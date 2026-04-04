@@ -10,6 +10,7 @@ CHROMA_DIR = Path("chroma_db")
 EMBEDDING_MODEL = "zembed-1"
 EMBEDDING_DIMENSIONS = 2560
 VLM_MODEL = "gemini-2.5-pro"
+REASONING_MODEL = "gemini-2.5-pro"  # Swap independently for ablation
 
 # ── ChromaDB ───────────────────────────────────────────────────────────────────
 CHROMA_COLLECTION = "property_law_kb"
