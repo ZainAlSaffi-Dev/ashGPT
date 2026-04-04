@@ -211,3 +211,6 @@ data/
 
 # ChromaDB
 chroma_db/
+
+# Evaluation outputs
+eval_results/

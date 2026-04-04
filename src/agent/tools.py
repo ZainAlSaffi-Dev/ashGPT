@@ -14,7 +14,13 @@ from dotenv import load_dotenv
 from langchain_chroma import Chroma
 
 from src.agent.state import RetrievedDocument
-from src.config import CHROMA_COLLECTION, CHROMA_DIR
+from src.config import (
+    CHROMA_COLLECTION,
+    CHROMA_DIR,
+    MMR_FETCH_K,
+    MMR_LAMBDA,
+    RETRIEVAL_STRATEGY,
+)
 from src.embeddings import ZeroEntropyEmbeddings
 
 load_dotenv()
@@ -65,6 +71,30 @@ def _build_filter(
     return {"$and": conditions}
 
 
+# ── Search dispatch ───────────────────────────────────────────────────────────
+
+
+def _search(
+    store: Chroma,
+    query: str,
+    k: int,
+    where_filter: dict | None,
+    strategy: str | None = None,
+) -> list:
+    """Run either similarity or MMR search based on the configured strategy."""
+    strat = strategy or RETRIEVAL_STRATEGY
+
+    if strat == "mmr":
+        return store.max_marginal_relevance_search(
+            query,
+            k=k,
+            fetch_k=MMR_FETCH_K,
+            lambda_mult=MMR_LAMBDA,
+            filter=where_filter,
+        )
+    return store.similarity_search(query, k=k, filter=where_filter)
+
+
 # ── Retrieval functions ───────────────────────────────────────────────────────
 
 
@@ -89,18 +119,22 @@ def retrieve_texts(
     query: str,
     week: str | None = None,
     k: int = 6,
+    strategy: str | None = None,
 ) -> list[RetrievedDocument]:
     """Retrieve text chunks (readings, tutorials, supplementary) from the KB.
 
     Excludes lecture slides so that text and image modalities remain separate
     in the state, allowing independent processing by downstream nodes.
+
+    Args:
+        strategy: Override the global RETRIEVAL_STRATEGY for ablation.
     """
     store = _get_vectorstore()
     doc_types = ["reading", "tutorial", "supplementary"]
     where_filter = _build_filter(week=week, doc_types=doc_types)
 
-    results = store.similarity_search(query, k=k, filter=where_filter)
-    log.info("retrieve_texts: %d results (week=%s)", len(results), week)
+    results = _search(store, query, k=k, where_filter=where_filter, strategy=strategy)
+    log.info("retrieve_texts [%s]: %d results (week=%s)", strategy or RETRIEVAL_STRATEGY, len(results), week)
     return _raw_to_retrieved(results)
 
 
@@ -108,17 +142,21 @@ def retrieve_slides(
     query: str,
     week: str | None = None,
     k: int = 4,
+    strategy: str | None = None,
 ) -> list[RetrievedDocument]:
     """Retrieve lecture slide descriptions from the KB.
 
     Returns slides whose VLM-generated descriptions are semantically similar
     to the query. Each result carries an image_path for reference.
+
+    Args:
+        strategy: Override the global RETRIEVAL_STRATEGY for ablation.
     """
     store = _get_vectorstore()
     where_filter = _build_filter(week=week, doc_types=["lecture_slide"])
 
-    results = store.similarity_search(query, k=k, filter=where_filter)
-    log.info("retrieve_slides: %d results (week=%s)", len(results), week)
+    results = _search(store, query, k=k, where_filter=where_filter, strategy=strategy)
+    log.info("retrieve_slides [%s]: %d results (week=%s)", strategy or RETRIEVAL_STRATEGY, len(results), week)
     return _raw_to_retrieved(results)
 
 

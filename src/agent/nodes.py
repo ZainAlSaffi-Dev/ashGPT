@@ -158,7 +158,7 @@ def retrieval_node(state: AgentState) -> dict:
     week = state.get("week_filter")
     log.info("RetrievalNode: searching KB (week=%s)", week)
 
-    texts, slides = retrieve_all(query, week=week, k_text=6, k_slides=4)
+    texts, slides = retrieve_all(query, week=week, k_text=8, k_slides=4)
 
     log.info(
         "RetrievalNode: retrieved %d text chunks, %d slides",
@@ -186,9 +186,16 @@ RATIO_SYSTEM = (
     "2. **Rule**: State the legal rule or principle (this IS the ratio decidendi).\n"
     "3. **Application**: Explain how the court applied the rule to the facts.\n"
     "4. **Conclusion**: State the court's decision.\n\n"
-    "Be precise. Cite case names exactly as they appear in the sources. "
-    "Do not invent facts or rules not supported by the provided context. "
-    "If the context is insufficient, say so explicitly."
+    "GROUNDING RULES:\n"
+    "- FACTS must come from the sources: case names, dates, statutory references, "
+    "holdings, and specific legal tests MUST appear in the source material. "
+    "Do NOT invent cases, statutes, or factual claims.\n"
+    "- EXPLANATIONS are encouraged: you may paraphrase, simplify, and explain "
+    "legal concepts in plain English to help the student understand. This is "
+    "your role as a tutor.\n"
+    "- If you cite a case or statute by name, it MUST appear in the sources.\n"
+    "- If the source material is insufficient, say so explicitly rather than "
+    "filling gaps from your own knowledge."
 )
 
 
@@ -239,14 +246,31 @@ CHRONOLOGY_SYSTEM = (
     "1. Extract the chronological sequence of events from the source material.\n"
     "2. Output a valid Mermaid.js flowchart using `graph TD` syntax.\n"
     "3. After the Mermaid block, provide a brief plain-English summary of the timeline.\n\n"
-    "Mermaid rules:\n"
+    "STRICT Mermaid formatting rules for readability:\n"
     "- Use `graph TD` (top-down) direction.\n"
-    "- Node IDs must be single words or camelCase (no spaces).\n"
-    "- Use square brackets for labels: `nodeId[\"Label text here\"]`.\n"
-    "- Use arrows with labels for transitions: `A -->|\"action\"| B`.\n"
-    "- Wrap labels containing special characters in double quotes.\n"
-    "- Do NOT use the keyword `end` as a node ID.\n\n"
-    "Format your response as:\n"
+    "- Node IDs must be camelCase (no spaces): e.g. `ownerDies`, `titlePasses`.\n"
+    "- KEEP NODE LABELS SHORT — maximum 8-10 words per node. Put dates at the start.\n"
+    "  GOOD: `e1[\"1881: Clissold enters possession\"]`\n"
+    "  BAD:  `e1[\"1881: Frederick Clissold enters into possession of the land and begins to enclose it\"]`\n"
+    "- Put extra detail on the EDGE labels, not the nodes:\n"
+    "  GOOD: `e1 -->|\"encloses land, pays rates\"| e2`\n"
+    "- Use round brackets for decision nodes: `d1{\"Owner consents?\"}`\n"
+    "- Use subgraphs to group related phases: `subgraph phase1 [\"Phase 1: Possession\"]`\n"
+    "- Wrap ALL labels in double quotes.\n"
+    "- Do NOT use the keyword `end` as a node ID.\n"
+    "- Aim for 5-12 nodes total. Fewer is better — each node is one key event.\n\n"
+    "Example of a GOOD diagram:\n"
+    "```\n"
+    "graph TD\n"
+    "    subgraph possession [\"Establishing Possession\"]\n"
+    "        e1[\"1881: Clissold takes possession\"] -->|\"encloses land, pays rates\"| e2[\"1881-1891: Continuous occupation\"]\n"
+    "    end\n"
+    "    subgraph limitation [\"Limitation Period\"]\n"
+    "        e2 -->|\"12 years pass\"| e3[\"1893: Limitation period expires\"]\n"
+    "    end\n"
+    "    e3 -->|\"owner's title extinguished\"| e4[\"Title vests in possessor\"]\n"
+    "```\n\n"
+    "Format your full response as:\n"
     "```mermaid\n<your flowchart>\n```\n\n"
     "**Timeline Summary:**\n<plain-English summary>"
 )
@@ -265,7 +289,10 @@ def chronology_node(state: AgentState) -> dict:
         f"USER QUESTION: {query}\n\n"
         f"SOURCE MATERIAL:\n{context}\n\n"
         "Extract the chronological sequence of events and generate a Mermaid.js "
-        "flowchart showing the chain of title or timeline of legal events."
+        "flowchart showing the chain of title or timeline of legal events.\n\n"
+        "IMPORTANT: Only include events, dates, and parties that appear in the "
+        "source material above. Do not invent events. You may label diagram "
+        "edges with brief plain-English explanations of what happened."
     )
 
     log.info("ChronologyNode: generating Mermaid.js diagram")
@@ -297,17 +324,27 @@ def chronology_node(state: AgentState) -> dict:
 
 
 SYNTHESIS_SYSTEM = (
-    "You are an expert Australian Property Law tutor providing a final, "
-    "comprehensive answer to a student's question.\n\n"
+    "You are an expert Australian Property Law tutor providing a final answer "
+    "to a student's question.\n\n"
     "You will be given:\n"
     "- The student's original question.\n"
     "- Retrieved source material from readings and lecture slides.\n"
     "- Optionally, an IRAC analysis with the ratio decidendi.\n"
     "- Optionally, a chronological timeline summary.\n\n"
-    "Synthesise all available information into a clear, well-structured answer. "
-    "Ensure 100% fidelity to the source material — do not invent facts. "
-    "Cite case names and statutory references as they appear in the sources. "
-    "If a Mermaid diagram was generated, reference it in your answer."
+    "GROUNDING RULES:\n"
+    "- FACTS must come from the sources: all case names, dates, statutory "
+    "references, legal tests, and holdings you mention MUST appear in the "
+    "provided source material or upstream IRAC/chronology analysis. Do NOT "
+    "invent or import cases, statutes, or facts from your own knowledge.\n"
+    "- EXPLANATIONS are encouraged: paraphrase, simplify, and connect ideas "
+    "in plain English to help the student understand. You are a tutor, not "
+    "a copy machine.\n"
+    "- Use inline citations where you rely on specific sources, e.g. "
+    "(Source: Readings Week 3) or (Source: Lecture 2 Slide 5).\n"
+    "- If the sources are insufficient, say: \"The provided sources do not "
+    "cover [topic] in detail. Please consult your additional readings.\"\n"
+    "- If a Mermaid diagram was generated, reference it in your answer.\n\n"
+    "Structure your answer clearly with headings and paragraphs."
 )
 
 
@@ -325,30 +362,36 @@ def synthesis_node(state: AgentState) -> dict:
     sections: list[str] = [
         f"STUDENT QUESTION: {query}",
         f"DETECTED INTENT: {intent}",
-        f"\nSOURCE MATERIAL:\n{context}",
+        f"\n{'='*60}",
+        f"PRIMARY EVIDENCE (ground your answer in this):\n{context}",
+        f"{'='*60}",
     ]
 
     irac = state.get("irac_analysis", "")
-    if irac:
-        sections.append(f"\nIRAC ANALYSIS (from Ratio Extractor):\n{irac}")
-
     ratio = state.get("ratio_decidendi", "")
-    if ratio:
-        sections.append(f"\nRATIO DECIDENDI: {ratio}")
-
     mermaid = state.get("mermaid_diagram", "")
-    if mermaid:
-        sections.append(
-            f"\nCHRONOLOGICAL FLOWCHART (Mermaid.js):\n```mermaid\n{mermaid}\n```"
-        )
-
     chrono = state.get("chronology_summary", "")
-    if chrono:
-        sections.append(f"\nTIMELINE SUMMARY:\n{chrono}")
+
+    if irac or ratio or mermaid or chrono:
+        sections.append(
+            "\nDERIVED ANALYSIS (use for structure and framing, but verify "
+            "all facts against the PRIMARY EVIDENCE above):"
+        )
+        if ratio:
+            sections.append(f"\nRatio Decidendi: {ratio}")
+        if irac:
+            sections.append(f"\nIRAC Analysis:\n{irac}")
+        if mermaid:
+            sections.append(f"\nChronological Flowchart:\n```mermaid\n{mermaid}\n```")
+        if chrono:
+            sections.append(f"\nTimeline Summary:\n{chrono}")
 
     prompt = "\n".join(sections) + (
-        "\n\nUsing all the information above, provide a comprehensive, "
-        "well-structured final answer to the student's question."
+        "\n\nSynthesise a final answer for the student. Use the DERIVED "
+        "ANALYSIS for structure and framing, but ensure every factual claim "
+        "(cases, dates, statutes, legal tests) is supported by the PRIMARY "
+        "EVIDENCE. If the derived analysis mentions something not in the "
+        "primary evidence, omit it."
     )
 
     log.info("SynthesisNode: compiling final answer")
