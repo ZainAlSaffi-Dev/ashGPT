@@ -12,3 +12,5 @@ streamlit>=1.45.0
 pytest>=8.0.0
 matplotlib>=3.9.0
 streamlit-mermaid>=0.4.0
+anthropic>=0.40.0
+openai>=1.50.0

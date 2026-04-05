@@ -14,43 +14,20 @@ import logging
 import re
 
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
 
 from src.agent.state import AgentState
 from src.agent.tools import retrieve_all
-from src.config import REASONING_MODEL
+from src.config import (
+    CHRONOLOGY_MODEL,
+    RATIO_EXTRACTOR_MODEL,
+    ROUTER_MODEL,
+    SYNTHESIS_MODEL,
+)
+from src.llm import llm_call
 
 load_dotenv()
 
 log = logging.getLogger(__name__)
-
-# ── Shared LLM client ─────────────────────────────────────────────────────────
-
-_client: genai.Client | None = None
-
-
-def _get_client() -> genai.Client:
-    """Lazily initialise and cache the Gemini client."""
-    global _client
-    if _client is None:
-        _client = genai.Client()
-    return _client
-
-
-def _llm_call(prompt: str, system_instruction: str | None = None) -> str:
-    """Make a single LLM call and return the text response."""
-    client = _get_client()
-    config = types.GenerateContentConfig(
-        temperature=0.2,
-        system_instruction=system_instruction,
-    )
-    response = client.models.generate_content(
-        model=REASONING_MODEL,
-        contents=prompt,
-        config=config,
-    )
-    return response.text
 
 
 def _append_trace(state: AgentState, node_name: str) -> list[str]:
@@ -119,7 +96,7 @@ def router_node(state: AgentState) -> dict:
     query = state["query"]
     log.info("RouterNode: classifying query")
 
-    raw = _llm_call(query, system_instruction=ROUTER_SYSTEM)
+    raw = llm_call(query, model=ROUTER_MODEL, system_instruction=ROUTER_SYSTEM)
 
     try:
         cleaned = re.sub(r"```json\s*|\s*```", "", raw).strip()
@@ -217,7 +194,7 @@ def ratio_extractor_node(state: AgentState) -> dict:
     )
 
     log.info("RatioExtractorNode: generating IRAC analysis")
-    response = _llm_call(prompt, system_instruction=RATIO_SYSTEM)
+    response = llm_call(prompt, model=RATIO_EXTRACTOR_MODEL, system_instruction=RATIO_SYSTEM)
 
     ratio_line = ""
     for line in response.split("\n"):
@@ -296,7 +273,7 @@ def chronology_node(state: AgentState) -> dict:
     )
 
     log.info("ChronologyNode: generating Mermaid.js diagram")
-    response = _llm_call(prompt, system_instruction=CHRONOLOGY_SYSTEM)
+    response = llm_call(prompt, model=CHRONOLOGY_MODEL, system_instruction=CHRONOLOGY_SYSTEM)
 
     mermaid_match = re.search(r"```mermaid\s*\n(.*?)```", response, re.DOTALL)
     mermaid_diagram = mermaid_match.group(1).strip() if mermaid_match else ""
@@ -395,7 +372,7 @@ def synthesis_node(state: AgentState) -> dict:
     )
 
     log.info("SynthesisNode: compiling final answer")
-    final_answer = _llm_call(prompt, system_instruction=SYNTHESIS_SYSTEM)
+    final_answer = llm_call(prompt, model=SYNTHESIS_MODEL, system_instruction=SYNTHESIS_SYSTEM)
 
     return {
         "final_answer": final_answer,

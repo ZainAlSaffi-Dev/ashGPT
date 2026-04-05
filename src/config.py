@@ -6,11 +6,24 @@ from pathlib import Path
 DATA_DIR = Path("data")
 CHROMA_DIR = Path("chroma_db")
 
-# ── Models ─────────────────────────────────────────────────────────────────────
+# ── Embeddings ─────────────────────────────────────────────────────────────────
 EMBEDDING_MODEL = "zembed-1"
 EMBEDDING_DIMENSIONS = 2560
-VLM_MODEL = "gemini-3.1-pro"
-REASONING_MODEL = "gemini-3.1-pro-preview"  # Swap independently for ablation
+
+# ── Per-Node Model Assignments ─────────────────────────────────────────────────
+# Prefix determines provider: "gemini-" → Google, "gpt-" → OpenAI, "claude-" → Anthropic
+VLM_MODEL = "gemini-2.5-pro"                # Slide description during indexing
+
+ROUTER_MODEL = "gemini-3.1-flash-lite-preview"                  # Lightweight: intent classification
+RATIO_EXTRACTOR_MODEL = "gpt-5.3-chat-latest"     # Mid-tier: IRAC extraction
+CHRONOLOGY_MODEL = "gemini-3-flash-preview"              # Lightweight: Mermaid generation
+SYNTHESIS_MODEL = "gpt-5.4-mini"                 # Strong: final grounded answer
+
+# ── Evaluation ─────────────────────────────────────────────────────────────────
+BASELINE_MODEL = "gpt-5.4-mini"             # Plain LLM baseline (no retrieval)
+
+JUDGE_DRAFT_MODEL = "gemini-3-flash-preview"  # Stage 1: initial judgment (different provider to avoid bias)
+JUDGE_CRITIQUE_MODEL = "gpt-5.4"            # Stage 2: critiques and finalises score
 
 # ── ChromaDB ───────────────────────────────────────────────────────────────────
 CHROMA_COLLECTION = "property_law_kb"
@@ -20,11 +33,9 @@ CHUNK_SIZE = 1500
 CHUNK_OVERLAP = 300
 
 # ── Retrieval ──────────────────────────────────────────────────────────────────
-# "similarity" = pure cosine similarity (fast, may cluster on one source)
-# "mmr"        = maximal marginal relevance (balances relevance + diversity)
 RETRIEVAL_STRATEGY = "mmr"
-MMR_LAMBDA = 0.5        # 1.0 = pure relevance, 0.0 = max diversity
-MMR_FETCH_K = 20        # candidate pool size before MMR selection
+MMR_LAMBDA = 0.5
+MMR_FETCH_K = 20
 
 # ── VLM prompt for lecture slide description ──────────────────────────────────
 SLIDE_DESCRIPTION_PROMPT = (

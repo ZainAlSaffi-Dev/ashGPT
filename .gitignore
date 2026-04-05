@@ -213,4 +213,3 @@ data/
 chroma_db/
 
 # Evaluation outputs
-eval_results/
