@@ -23,6 +23,13 @@ class RetrievedDocument(TypedDict):
     image_path: str | None
 
 
+class ChatMessage(TypedDict):
+    """One turn in the session transcript (Streamlit roles map directly)."""
+
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class AgentState(TypedDict, total=False):
     """Full state flowing through the LangGraph pipeline.
 
@@ -35,6 +42,7 @@ class AgentState(TypedDict, total=False):
     # ── Input ──────────────────────────────────────────────────────────────
     query: str
     week_filter: str | None
+    chat_history: list[ChatMessage]  # prior turns only; current message is ``query``
 
     # ── Router output ──────────────────────────────────────────────────────
     intent: Literal["ratio", "chronology", "summary", "general"]

@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 import time
 
 import streamlit as st
@@ -22,6 +23,22 @@ from streamlit_mermaid import st_mermaid
 load_dotenv()
 
 from src.agent.graph import run_query
+
+
+def render_message(content: str) -> None:
+    """Render a message, splitting out any ```mermaid blocks for st_mermaid.
+
+    Plain markdown segments are passed to st.markdown; Mermaid blocks are
+    rendered with st_mermaid so they display as interactive diagrams both
+    on first render and when replayed from session history.
+    """
+    parts = re.split(r"(```mermaid\n.*?```)", content, flags=re.DOTALL)
+    for part in parts:
+        m = re.fullmatch(r"```mermaid\n(.*?)```", part, flags=re.DOTALL)
+        if m:
+            st_mermaid(m.group(1).strip(), height="auto")
+        elif part.strip():
+            st.markdown(part)
 
 # ── Page Config ────────────────────────────────────────────────────────────────
 
@@ -52,6 +69,10 @@ with st.sidebar:
     )
     st.caption("INFS4205 Systems Engineering Project")
 
+    if st.button("Clear conversation", help="Reset session memory for this browser tab"):
+        st.session_state.messages = []
+        st.rerun()
+
 # ── Chat History ───────────────────────────────────────────────────────────────
 
 if "messages" not in st.session_state:
@@ -61,13 +82,14 @@ st.title("Property Law Exam Assistant")
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"], unsafe_allow_html=True)
+        render_message(msg["content"])
 
 # ── Chat Input ─────────────────────────────────────────────────────────────────
 
 prompt = st.chat_input("Ask a property law question...")
 
 if prompt:
+    chat_prior = [dict(m) for m in st.session_state.messages]
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -75,7 +97,11 @@ if prompt:
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             start = time.time()
-            result = run_query(prompt, week_filter=week_filter)
+            result = run_query(
+                prompt,
+                week_filter=week_filter,
+                chat_history=chat_prior or None,
+            )
             elapsed = time.time() - start
 
         # ── Intent & Trace Banner ──────────────────────────────────────────
@@ -89,17 +115,21 @@ if prompt:
 
         st.divider()
 
-        # ── Final Answer ───────────────────────────────────────────────────
+        # ── Final Answer (with inline Mermaid rendering) ───────────────────
         final_answer = result.get("final_answer", "")
-        st.markdown(final_answer)
-
-        # ── Mermaid Diagram ────────────────────────────────────────────────
         mermaid = result.get("mermaid_diagram", "")
-        if mermaid:
-            st.divider()
-            st.subheader("Chronological Flowchart")
-            st_mermaid(mermaid, height="auto")
 
+        # Build the stored content (diagram embedded so history replays it)
+        response_content = final_answer
+        if mermaid and f"```mermaid" not in final_answer:
+            # Synthesis didn't include the block inline — append it so the
+            # stored message and the expander both have the code available
+            response_content += f"\n\n```mermaid\n{mermaid}\n```"
+
+        render_message(response_content)
+
+        # ── Raw code expander (only when a diagram exists) ─────────────────
+        if mermaid:
             with st.expander("Raw Mermaid code (copy for mermaid.live)"):
                 st.code(mermaid, language="text")
 
@@ -128,7 +158,4 @@ if prompt:
                     for s in slides:
                         st.markdown(f"- `[{s['week']}]` **{s['source']}**")
 
-    response_content = final_answer
-    if mermaid:
-        response_content += f"\n\n```mermaid\n{mermaid}\n```"
     st.session_state.messages.append({"role": "assistant", "content": response_content})

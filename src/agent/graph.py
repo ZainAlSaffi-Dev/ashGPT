@@ -8,6 +8,10 @@ the query takes through the graph:
     chronology → Retrieval → Chronology Generator → Synthesis
     summary    → Retrieval → Ratio Extractor → Chronology Generator → Synthesis
     general    → Retrieval → Synthesis (context-only, no specialised reasoning)
+
+Optional ``chat_history`` (prior turns) is passed through ``run_query`` so the
+router, retrieval packing, and downstream prompts can resolve follow-up
+questions while the current utterance remains ``query``.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from src.agent.nodes import (
     router_node,
     synthesis_node,
 )
+from src.agent.chat_memory import prepare_chat_history_for_run
 from src.agent.state import AgentState
 
 load_dotenv()
@@ -119,12 +124,23 @@ def get_graph():
     return _compiled_graph
 
 
-def run_query(query: str, week_filter: str | None = None) -> AgentState:
-    """Run a query through the full agent pipeline. Returns the final state."""
+def run_query(
+    query: str,
+    week_filter: str | None = None,
+    chat_history: list[dict[str, str]] | None = None,
+) -> AgentState:
+    """Run a query through the full agent pipeline. Returns the final state.
+
+    ``chat_history`` should contain **prior** turns only (each dict has ``role``
+    and ``content``); the current user message must be passed only in ``query``.
+    """
     graph = get_graph()
     initial_state: AgentState = {"query": query}
     if week_filter:
         initial_state["week_filter"] = week_filter
+    prepared = prepare_chat_history_for_run(chat_history)
+    if prepared:
+        initial_state["chat_history"] = prepared
 
     result = graph.invoke(initial_state)
     return result

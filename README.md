@@ -55,7 +55,20 @@ Reasoning is **not** tied to a single vendor. `src/llm.py` dispatches by model n
 | **Baseline** | Plain LLM (`BASELINE_MODEL`), no retrieval, no graph |
 | **Ablation** | Retrieval + synthesis only; **no** router-driven ratio or chronology nodes (`intent` fixed to `general`) |
 
-**Automated metrics** (besides judges): heuristic **Mermaid** structural checks, **IRAC** keyword coverage, **latency**, **per-node latency** (agent), and **token usage** (via `src/llm.py`).
+**Query families (explicit coursework coverage):** each row in `EVAL_CASES` inside `run_evals.py` is tagged with exactly one of:
+
+| Family | What we test |
+|--------|----------------|
+| `factual_retrieval` | Direct doctrine / tests / definitions from the indexed KB |
+| `cross_modal_retrieval` | Questions phrased to pull **lecture slide (VLM) descriptions** as well as PDF text |
+| `analytical_synthesis` | Compare, relate, summarise, or sequence ideas across multiple retrieved sources |
+| `conversational_followup` | **Two-turn** scripts: agent and ablation run with `chat_history`; baseline sees **only the final turn** |
+
+Outputs include `query_family`, `case_id`, and `case_rationale` per row in `eval_results.json`; `eval_summary.json` has `by_query_family` aggregates; `failure_analysis.md` opens with a **per-family** checklist and scores; `groundedness_by_query_family.png` plots the agent by family.
+
+**Retrieval metrics** (LLM-as-judge, binary relevance per chunk in ranked order): **precision@K**, **MRR** (reciprocal rank of the first relevant chunk), **Hit@K** (any relevant in the top-K), **NDCG@K**. Summaries and `retrieval_ranking_metrics.png` compare the full agent vs ablation. Optional **`--retrieval-pool-eval`** re-retrieves a larger pool (`EVAL_RETRIEVAL_POOL_K_*` in `config.py`), judges every chunk once, and adds **recall-vs-pool** = (relevant in production top-K) ÷ (relevant anywhere in pool) — a bounded proxy for recall, **not** full-corpus recall (document the limitation in your report).
+
+**Automated metrics** (besides judges): heuristic **Mermaid** structural checks, **IRAC** keyword coverage, **latency**, **per-node latency** (agent), **token usage** (via `src/llm.py`), and on cross-modal cases **retrieval diagnostics** (text vs slide chunk counts).
 
 After a run, see `eval_results/eval_summary.json` and the generated plots. Numbers change with models, prompts, and data—re-run the suite for your report.
 
@@ -142,7 +155,17 @@ python -m src.indexing.build_index
 streamlit run app.py
 ```
 
-The UI keeps **chat history in the session** for display, but each question is processed as a **single-turn** invocation of `run_query`—prior turns are not passed into the graph unless you extend the code.
+#### Conversational memory (multi-turn)
+
+The UI stores messages in `st.session_state`. On each send, **prior** turns are passed to `run_query(..., chat_history=...)` as `AgentState.chat_history`; the **current** message is always `query` alone.
+
+- **Router** sees the transcript so follow-ups like “explain that ratio” or “draw the timeline for that case” resolve correctly.
+- **Retrieval** embeds a **packed query**: the new student message plus a **short excerpt** of the last tutor reply (see `CHAT_HISTORY_MAX_ASSISTANT_TAIL_CHARS` in `config.py`), so vector search stays on-topic without dumping the whole prior answer into the embedding.
+- **Ratio, chronology, and synthesis** receive the formatted transcript so answers stay coherent across turns; **grounding rules** still require facts to come from retrieved sources.
+
+Limits: `CHAT_HISTORY_MAX_MESSAGES` and `CHAT_HISTORY_MAX_CHARS_PER_MESSAGE` cap cost and context size. **Clear conversation** in the sidebar wipes session memory. Memory is **per browser tab**, not persisted to disk.
+
+The quantitative suite in `src/eval/run_evals.py` remains **single-turn** (no `chat_history`) so baseline and ablation comparisons stay fixed—report multi-turn behaviour as a **product / qualitative** capability unless you add dedicated multi-turn eval scenarios.
 
 ### Evaluation
 
@@ -170,6 +193,7 @@ ashGPT/
 │   │   └── build_index.py         # Multimodal ingestion (PDF + slide images)
 │   ├── agent/
 │   │   ├── state.py               # LangGraph state (TypedDict)
+│   │   ├── chat_memory.py         # Trim/format history, retrieval query packing
 │   │   ├── tools.py               # Chroma retrieval (MMR, filters)
 │   │   ├── nodes.py               # Router, retrieval, ratio, chronology, synthesis
 │   │   └── graph.py               # Conditional graph + run_query()

@@ -15,6 +15,11 @@ import re
 
 from dotenv import load_dotenv
 
+from src.agent.chat_memory import (
+    build_retrieval_query,
+    format_transcript_for_llm,
+    get_chat_history,
+)
 from src.agent.state import AgentState
 from src.agent.tools import retrieve_all
 from src.config import (
@@ -74,15 +79,30 @@ def _format_context(state: AgentState) -> str:
 
 ROUTER_SYSTEM = (
     "You are a query classifier for a Property Law study assistant. "
-    "Analyse the user's question and return ONLY a JSON object with two keys:\n"
+    "You may receive a prior conversation plus a LATEST student message. "
+    "Classify **only** the latest message, but use the transcript to resolve "
+    "vague references (e.g. \"that case\", \"the diagram\", \"explain further\").\n\n"
+    "Return ONLY a JSON object with two keys:\n"
     '  "intent": one of "ratio", "chronology", "summary", "general"\n'
     '  "week_filter": a string like "week_3" if the user mentions a specific '
     "week, or null if not.\n\n"
     "Intent definitions:\n"
     '- "ratio": user wants the ratio decidendi, binding legal rule, or IRAC analysis of a case.\n'
-    '- "chronology": user wants a timeline, flowchart, chain of title, or sequence of events.\n'
-    '- "summary": user wants a general case summary or explanation of a topic.\n'
+    '- "chronology": user ONLY wants a visual timeline, flowchart, diagram, chain of title, '
+    'sequence of events, chain of events, "who did what", "what happened and when", or '
+    '"walk me through the events" — with NO request for a broader explanation or summary.\n'
+    '- "summary": use this when the user wants (a) a general case explanation OR topic overview, '
+    'OR (b) asks for BOTH a sequence/timeline AND a broader explanation or summary. '
+    'Examples that must map to "summary": "explain X and give me the sequence of events", '
+    '"who was doing what and provide a summary", "walk me through the case". '
+    'This intent runs both the chronology diagram AND the IRAC analysis, so it is the '
+    'correct choice whenever the query combines a timeline request with any explanatory goal.\n'
     '- "general": anything else (greetings, meta-questions, off-topic).\n\n'
+    "DECISION RULE: If the query contains timeline/sequence language (e.g. \"sequence of "
+    "events\", \"who did what\", \"chain of events\", \"what happened\", \"walk me through\") "
+    "alongside any request for explanation, summary, or overview — classify as \"summary\", "
+    "NOT \"chronology\". Only use \"chronology\" when the user is asking solely for a "
+    "diagram or timeline with no broader explanation requested.\n\n"
     "Respond with ONLY the JSON object, no markdown fences."
 )
 
@@ -90,27 +110,40 @@ ROUTER_SYSTEM = (
 def router_node(state: AgentState) -> dict:
     """Classify the user's intent and extract any week filter.
 
-    Reads:  query
+    Reads:  query, chat_history, week_filter (UI may pre-set week; it wins over the model)
     Writes: intent, week_filter, node_trace
     """
     query = state["query"]
-    log.info("RouterNode: classifying query")
+    history = get_chat_history(state)
+    log.info("RouterNode: classifying query (history_turns=%d)", len(history))
 
-    raw = llm_call(query, model=ROUTER_MODEL, system_instruction=ROUTER_SYSTEM)
+    if history:
+        transcript = format_transcript_for_llm(history)
+        router_input = (
+            f"CONVERSATION SO FAR:\n{transcript}\n\n"
+            f"LATEST STUDENT MESSAGE (classify this):\n{query}"
+        )
+    else:
+        router_input = query
+
+    raw = llm_call(router_input, model=ROUTER_MODEL, system_instruction=ROUTER_SYSTEM)
 
     try:
         cleaned = re.sub(r"```json\s*|\s*```", "", raw).strip()
         parsed = json.loads(cleaned)
         intent = parsed.get("intent", "general")
-        week_filter = parsed.get("week_filter")
+        parsed_week = parsed.get("week_filter")
     except (json.JSONDecodeError, AttributeError):
         log.warning("Router failed to parse LLM output, defaulting to 'summary'")
         intent = "summary"
-        week_filter = None
+        parsed_week = None
 
     valid_intents = {"ratio", "chronology", "summary", "general"}
     if intent not in valid_intents:
         intent = "summary"
+
+    existing_week = state.get("week_filter")
+    week_filter = existing_week if existing_week else parsed_week
 
     log.info("RouterNode: intent=%s, week_filter=%s", intent, week_filter)
     return {
@@ -128,14 +161,15 @@ def router_node(state: AgentState) -> dict:
 def retrieval_node(state: AgentState) -> dict:
     """Query ChromaDB for relevant text chunks and slide descriptions.
 
-    Reads:  query, week_filter
+    Reads:  query, week_filter, chat_history
     Writes: retrieved_texts, retrieved_slides, node_trace
     """
-    query = state["query"]
+    history = get_chat_history(state)
+    search_q = build_retrieval_query(state["query"], history)
     week = state.get("week_filter")
-    log.info("RetrievalNode: searching KB (week=%s)", week)
+    log.info("RetrievalNode: searching KB (week=%s, follow_up=%s)", week, bool(history))
 
-    texts, slides = retrieve_all(query, week=week, k_text=8, k_slides=4)
+    texts, slides = retrieve_all(search_q, week=week, k_text=8, k_slides=4)
 
     log.info(
         "RetrievalNode: retrieved %d text chunks, %d slides",
@@ -184,13 +218,23 @@ def ratio_extractor_node(state: AgentState) -> dict:
     """
     query = state["query"]
     context = _format_context(state)
+    history = get_chat_history(state)
+    hist_block = (
+        f"CONVERSATION HISTORY:\n{format_transcript_for_llm(history)}\n\n"
+        if history
+        else ""
+    )
 
     prompt = (
-        f"USER QUESTION: {query}\n\n"
+        f"{hist_block}"
+        f"CURRENT USER QUESTION: {query}\n\n"
         f"SOURCE MATERIAL:\n{context}\n\n"
         "Based on the source material above, provide:\n"
         "1. The RATIO DECIDENDI (the exact binding legal rule) in one clear sentence.\n"
-        "2. A full IRAC analysis."
+        "2. A full IRAC analysis.\n\n"
+        "If the question refers to earlier turns, use the conversation history only "
+        "to interpret what the student means — all legal facts must still come from "
+        "the source material."
     )
 
     log.info("RatioExtractorNode: generating IRAC analysis")
@@ -261,15 +305,24 @@ def chronology_node(state: AgentState) -> dict:
     """
     query = state["query"]
     context = _format_context(state)
+    history = get_chat_history(state)
+    hist_block = (
+        f"CONVERSATION HISTORY:\n{format_transcript_for_llm(history)}\n\n"
+        if history
+        else ""
+    )
 
     prompt = (
-        f"USER QUESTION: {query}\n\n"
+        f"{hist_block}"
+        f"CURRENT USER QUESTION: {query}\n\n"
         f"SOURCE MATERIAL:\n{context}\n\n"
         "Extract the chronological sequence of events and generate a Mermaid.js "
         "flowchart showing the chain of title or timeline of legal events.\n\n"
         "IMPORTANT: Only include events, dates, and parties that appear in the "
         "source material above. Do not invent events. You may label diagram "
-        "edges with brief plain-English explanations of what happened."
+        "edges with brief plain-English explanations of what happened.\n\n"
+        "Use conversation history only to interpret follow-up phrasing; facts "
+        "must come from the sources."
     )
 
     log.info("ChronologyNode: generating Mermaid.js diagram")
@@ -307,7 +360,7 @@ SYNTHESIS_SYSTEM = (
     "- The student's original question.\n"
     "- Retrieved source material from readings and lecture slides.\n"
     "- Optionally, an IRAC analysis with the ratio decidendi.\n"
-    "- Optionally, a chronological timeline summary.\n\n"
+    "- Optionally, a Mermaid.js chronological flowchart and timeline summary.\n\n"
     "GROUNDING RULES:\n"
     "- FACTS must come from the sources: all case names, dates, statutory "
     "references, legal tests, and holdings you mention MUST appear in the "
@@ -320,7 +373,18 @@ SYNTHESIS_SYSTEM = (
     "(Source: Readings Week 3) or (Source: Lecture 2 Slide 5).\n"
     "- If the sources are insufficient, say: \"The provided sources do not "
     "cover [topic] in detail. Please consult your additional readings.\"\n"
-    "- If a Mermaid diagram was generated, reference it in your answer.\n\n"
+    "- If CONVERSATION HISTORY is provided, continue the same study session: resolve "
+    "pronouns and short follow-ups using the transcript, but every **new** factual "
+    "claim about cases or law must still appear in the PRIMARY EVIDENCE (or "
+    "verified derived analysis).\n\n"
+    "CRITICAL — MERMAID DIAGRAM PRESERVATION RULE:\n"
+    "If the DERIVED ANALYSIS section contains a ```mermaid code block, you MUST "
+    "copy that exact ```mermaid ... ``` block verbatim into your final answer. "
+    "The UI renders it as an interactive diagram — if you omit the code block or "
+    "convert it to bullet points or prose, the diagram will be lost entirely. "
+    "Do NOT paraphrase, summarise, or rewrite the Mermaid block in any form. "
+    "Place the ```mermaid block where it fits naturally in your answer "
+    "(e.g. after introducing the timeline), then continue with your explanation.\n\n"
     "Structure your answer clearly with headings and paragraphs."
 )
 
@@ -335,14 +399,25 @@ def synthesis_node(state: AgentState) -> dict:
     query = state["query"]
     intent = state.get("intent", "general")
     context = _format_context(state)
+    history = get_chat_history(state)
 
-    sections: list[str] = [
-        f"STUDENT QUESTION: {query}",
-        f"DETECTED INTENT: {intent}",
-        f"\n{'='*60}",
-        f"PRIMARY EVIDENCE (ground your answer in this):\n{context}",
-        f"{'='*60}",
-    ]
+    sections: list[str] = []
+    if history:
+        sections.append(
+            "CONVERSATION HISTORY (session memory — use to interpret follow-ups):\n"
+            f"{format_transcript_for_llm(history)}"
+        )
+        sections.append("")
+
+    sections.extend(
+        [
+            f"CURRENT STUDENT MESSAGE: {query}",
+            f"DETECTED INTENT: {intent}",
+            f"\n{'='*60}",
+            f"PRIMARY EVIDENCE (ground your answer in this):\n{context}",
+            f"{'='*60}",
+        ]
+    )
 
     irac = state.get("irac_analysis", "")
     ratio = state.get("ratio_decidendi", "")
@@ -351,8 +426,9 @@ def synthesis_node(state: AgentState) -> dict:
 
     if irac or ratio or mermaid or chrono:
         sections.append(
-            "\nDERIVED ANALYSIS (use for structure and framing, but verify "
-            "all facts against the PRIMARY EVIDENCE above):"
+            "\nDERIVED ANALYSIS (incorporate this directly into your answer — "
+            "any ```mermaid block MUST be reproduced verbatim; verify all "
+            "factual claims against the PRIMARY EVIDENCE above):"
         )
         if ratio:
             sections.append(f"\nRatio Decidendi: {ratio}")
@@ -364,11 +440,13 @@ def synthesis_node(state: AgentState) -> dict:
             sections.append(f"\nTimeline Summary:\n{chrono}")
 
     prompt = "\n".join(sections) + (
-        "\n\nSynthesise a final answer for the student. Use the DERIVED "
-        "ANALYSIS for structure and framing, but ensure every factual claim "
-        "(cases, dates, statutes, legal tests) is supported by the PRIMARY "
-        "EVIDENCE. If the derived analysis mentions something not in the "
-        "primary evidence, omit it."
+        "\n\nSynthesise a final answer for the student. "
+        "IMPORTANT: If a ```mermaid code block appears in the DERIVED ANALYSIS, "
+        "you MUST include that exact ```mermaid ... ``` block verbatim in your "
+        "response — do not convert it to bullet points or prose. "
+        "Ensure every factual claim (cases, dates, statutes, legal tests) is "
+        "supported by the PRIMARY EVIDENCE. If the derived analysis mentions "
+        "something not in the primary evidence, omit it."
     )
 
     log.info("SynthesisNode: compiling final answer")

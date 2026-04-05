@@ -37,6 +37,15 @@ RETRIEVAL_STRATEGY = "mmr"
 MMR_LAMBDA = 0.5
 MMR_FETCH_K = 20
 
+# ── Multi-turn chat (Streamlit session → AgentState.chat_history) ─────────────
+CHAT_HISTORY_MAX_MESSAGES = 24
+CHAT_HISTORY_MAX_CHARS_PER_MESSAGE = 3500
+CHAT_HISTORY_MAX_ASSISTANT_TAIL_CHARS = 1200
+
+# ── Eval: optional deep retrieval pool (recall-vs-pool); larger = more judge API calls
+EVAL_RETRIEVAL_POOL_K_TEXT = 20
+EVAL_RETRIEVAL_POOL_K_SLIDES = 10
+
 # ── VLM prompt for lecture slide description ──────────────────────────────────
 SLIDE_DESCRIPTION_PROMPT = (
     "You are a legal education assistant. Describe this property law lecture "
