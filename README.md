@@ -8,125 +8,125 @@ A multimodal LangGraph agent for INFS4205 that assists law students with Austral
 
 ## Architecture
 
-The agent is a LangGraph state machine with conditional routing based on query intent:
+The agent is a **LangGraph** state machine with **conditional routing** after retrieval. The router classifies intent; specialised nodes run only when needed; synthesis always grounds the final answer in retrieved sources.
 
 ```
-User Query → Router → Retrieval → [Ratio Extractor | Chronology Generator | Both] → Synthesis
+User Query → Router → Retrieval → ┬→ Ratio Extractor ──┬→ Synthesis → END
+                                  │                    │
+                                  ├→ Chronology ───────┘
+                                  │
+                                  └→ Synthesis (general path only)
 ```
 
-| Node | Purpose |
-|------|---------|
-| **Query Router** | Classifies intent as `ratio`, `chronology`, `summary`, or `general`; extracts week filters |
-| **Retrieval Node** | Queries ChromaDB with MMR for text chunks and VLM-described lecture slides |
-| **Ratio Extractor** | Isolates the *ratio decidendi* and produces a full IRAC analysis |
-| **Chronology Generator** | Extracts timelines and outputs valid Mermaid.js flowcharts |
-| **Synthesis Node** | Compiles upstream outputs into a grounded final answer with source citations |
+| Intent | Path |
+|--------|------|
+| `ratio` | Router → Retrieval → Ratio Extractor → Synthesis |
+| `chronology` | Router → Retrieval → Chronology → Synthesis |
+| `summary` | Router → Retrieval → Ratio Extractor → Chronology → Synthesis |
+| `general` | Router → Retrieval → Synthesis |
 
-### Routing Paths
+| Node | Role |
+|------|------|
+| **Router** | Classifies `ratio` / `chronology` / `summary` / `general`; may suggest a `week` metadata filter |
+| **Retrieval** | ChromaDB over text chunks and VLM-described slides; **MMR** + optional week/type filters |
+| **Ratio Extractor** | Isolates *ratio decidendi* and structured **IRAC** from retrieved material |
+| **Chronology** | Builds a timeline and emits **Mermaid.js** flowchart syntax |
+| **Synthesis** | Produces the student-facing answer with citations; treats upstream IRAC/chronology as *derived* and re-checks facts against primary sources |
 
-| Intent | Path | When |
-|--------|------|------|
-| `ratio` | Router → Retrieval → Ratio Extractor → Synthesis | Student asks for a legal rule or IRAC |
-| `chronology` | Router → Retrieval → Chronology Generator → Synthesis | Student asks for a timeline or flowchart |
-| `summary` | Router → Retrieval → Ratio Extractor → Chronology → Synthesis | Student wants a full case summary |
-| `general` | Router → Retrieval → Synthesis | Greetings, simple questions |
+### Multi-provider LLM layer
+
+Reasoning is **not** tied to a single vendor. `src/llm.py` dispatches by model name prefix (`gemini-` → Google GenAI, `gpt-` → OpenAI Responses API, `claude-` → Anthropic). Per-node assignments live in `src/config.py` (typical layout—edit there to experiment):
+
+| Role | Model (as configured) |
+|------|------------------------|
+| Slide description (indexing VLM) | `gemini-2.5-pro` |
+| Router | `gemini-3.1-flash-lite-preview` |
+| Ratio extractor | `gpt-5.3-chat-latest` |
+| Chronology | `gemini-3-flash-preview` |
+| Synthesis | `gpt-5.4-mini` |
+
+### Evaluation & ablation (for quantitative comparison)
+
+`src/eval/run_evals.py` compares three configurations on the same queries:
+
+| Configuration | What it measures |
+|---------------|------------------|
+| **Full agent** | Complete LangGraph pipeline |
+| **Baseline** | Plain LLM (`BASELINE_MODEL`), no retrieval, no graph |
+| **Ablation** | Retrieval + synthesis only; **no** router-driven ratio or chronology nodes (`intent` fixed to `general`) |
+
+**Metrics** include LLM-as-a-judge **groundedness** (1–5) and **answer relevancy**, **context precision@K**, heuristic **Mermaid validity** and **IRAC compliance**, **latency**, **per-node latency** (agent), and **token usage**. Judging uses a **two-stage** flow (draft judge and critique judge on different providers/models where configured) to reduce self-bias.
+
+After a run, see `eval_results/eval_summary.json` and the generated plots. Numbers change with models, prompts, and data—re-run the suite for your report.
 
 ## Knowledge Base
 
-The knowledge base is **strictly pre-indexed** (no runtime uploads). It supports two modalities:
+The knowledge base is **strictly pre-indexed** (no runtime uploads). Two modalities:
 
-- **Text**: PDF case law readings, tutorial sheets, and supplementary notes — chunked (1500 chars, 300 overlap) and embedded via ZeroEntropy `zembed-1`.
-- **Image**: Lecture slide PNGs, described by Gemini VLM during indexing and embedded as searchable text with `image_path` metadata.
+- **Text**: PDF readings, tutorials, and notes — chunked (1500 characters, 300 overlap) and embedded with ZeroEntropy **`zembed-1`**.
+- **Image**: Lecture slides (**JPEG / PNG**) — described at index time by the configured **VLM**; descriptions are embedded as text with metadata (e.g. source, week).
 
-Retrieval uses **Maximal Marginal Relevance (MMR)** to balance relevance with source diversity, and supports metadata filtering by week and document type.
-
-## Evaluation Results
-
-Evaluated across 10 test queries spanning 6 weeks of content, using LLM-as-a-judge (groundedness scoring, 1-5 scale).
-
-### Gemini 3.1 Pro (Final Configuration)
-
-| Configuration | Avg Groundedness | Avg Latency | Source Diversity |
-|---------------|-----------------|-------------|-----------------|
-| **Full Agent** | **4.8 / 5.0** | 76.2s | 6.2 |
-| Plain LLM Baseline | 2.0 / 5.0 | 24.6s | 0.0 |
-| Ablation (no Ratio Extractor) | 5.0 / 5.0 | 23.2s | 5.8 |
-
-### Key Findings
-
-- The full agent achieves **140% higher groundedness** than the plain LLM baseline (4.8 vs 2.0).
-- The ablation (skipping the Ratio Extractor) scores marginally higher on strict groundedness (5.0 vs 4.8), but lacks the structured IRAC analysis and explicit *ratio decidendi* extraction that make the full agent pedagogically valuable.
-- Model upgrade from Gemini 2.5 Pro to 3.1 Pro improved agent groundedness from 4.5 to 4.8 and widened the baseline gap from 1.8 to 2.8.
+Retrieval uses **maximal marginal relevance (MMR)** with tunable λ and fetch-*k* in `src/config.py`.
 
 ## Setup
 
 ### Prerequisites
 
 - Python 3.11+
-- Conda (for environment management)
-- API keys: `GOOGLE_API_KEY` (Gemini), `ZEMBED_API_KEY` (ZeroEntropy embeddings)
+- Conda (recommended)
+- API keys as required by your `src/config.py` model choices (at minimum **Google** for Gemini, **ZeroEntropy** for embeddings; **OpenAI** if any `gpt-` model is used)
 
 ### Installation
 
 ```bash
-# Create and activate conda environment
 conda create -n genai python=3.11 pip -y
 conda activate genai
 pip install -r requirements.txt
 
-# Configure API keys
 cp .env.example .env
-# Edit .env with your API keys
+# Edit .env: GOOGLE_API_KEY, ZEMBED_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY as needed
 ```
 
-### Data Preparation
-
-Place your course materials in the `data/` directory:
+### Data layout
 
 ```
 data/
 ├── week_1/
-│   ├── lecture/        # PNG slide images
-│   ├── Readings (...).pdf
-│   └── Tutorial (...).pdf
+│   ├── lecture/          # Slide images (.jpg / .jpeg / .png)
+│   ├── readings/         # PDFs (optional subfolder name may vary)
+│   └── tutorial/         # PDFs
 ├── week_2/
 │   └── ...
-└── Supplementary Notes.pdf   # Optional root-level PDFs
+└── (optional root-level PDFs, e.g. supplementary notes)
 ```
 
-### Build the Index
+Adjust paths to match your course folder naming; the indexer expects a `week_*` structure with lecture images and PDFs discoverable under each week.
+
+### Build the index
 
 ```bash
 python -m src.indexing.build_index
 ```
 
-### Run the Application
+### Run the app
 
 ```bash
-# Streamlit frontend
 streamlit run app.py
-
-# Or inspect outputs in terminal
-python -m tests.inspect_outputs --query "What is adverse possession?" --week week_3
 ```
 
-### Run Evaluation
+The UI keeps **chat history in the session** for display, but each question is processed as a **single-turn** invocation of `run_query`—prior turns are not passed into the graph unless you extend the code.
+
+### Evaluation
 
 ```bash
 python -m src.eval.run_evals --output-dir eval_results
 ```
 
-### Run Tests
+### Tests
 
 ```bash
-# All tests
 pytest tests/ -v
-
-# Unit tests only (no API keys needed)
-pytest tests/ -v -m "not integration"
-
-# Fast integration tests only
-pytest tests/ -v -m "integration and not slow"
+pytest tests/ -v -m "not integration"    # no API keys
 ```
 
 ## Project Structure
@@ -135,41 +135,35 @@ pytest tests/ -v -m "integration and not slow"
 ashGPT/
 ├── app.py                         # Streamlit frontend
 ├── src/
-│   ├── config.py                  # Centralised constants and model config
+│   ├── config.py                  # Paths, chunking, retrieval, per-node models
+│   ├── llm.py                     # Unified multi-provider LLM dispatch + token tracking
 │   ├── embeddings.py              # ZeroEntropy embedding wrapper
 │   ├── indexing/
-│   │   └── build_index.py         # Multimodal ingestion pipeline
+│   │   └── build_index.py         # Multimodal ingestion (PDF + slide images)
 │   ├── agent/
-│   │   ├── state.py               # LangGraph TypedDict state definition
-│   │   ├── tools.py               # ChromaDB retrieval with MMR support
-│   │   ├── nodes.py               # 5 cognitive nodes (router, retrieval, ratio, chronology, synthesis)
-│   │   └── graph.py               # LangGraph workflow compilation
+│   │   ├── state.py               # LangGraph state (TypedDict)
+│   │   ├── tools.py               # Chroma retrieval (MMR, filters)
+│   │   ├── nodes.py               # Router, retrieval, ratio, chronology, synthesis
+│   │   └── graph.py               # Conditional graph + run_query()
 │   └── eval/
-│       └── run_evals.py           # Evaluation, ablation, and plot generation
+│       └── run_evals.py           # Baseline, ablation, judges, plots, failure notes
 ├── tests/
-│   ├── conftest.py                # Shared fixtures, auto-skip for missing API keys
-│   ├── test_phase1_indexing.py    # Config, embeddings, PDF extraction, ChromaDB integrity
-│   ├── test_phase2_retrieval.py   # State, tools, metadata filtering
-│   ├── test_phase3_nodes.py       # Node helpers, routing, reasoning output
-│   ├── test_phase4_graph.py       # Graph compilation, conditional routing
-│   ├── test_phase5_eval.py        # Eval framework, plotting, baselines
-│   └── inspect_outputs.py        # Interactive output inspection
-├── data/                          # Course materials (gitignored)
-├── chroma_db/                     # Persisted vector store (gitignored)
-├── eval_results/                  # Evaluation outputs (gitignored)
+├── data/                          # Course materials (gitignored content typical)
+├── chroma_db/                     # Local vector store
+├── eval_results/                  # Eval JSON + PNG plots (after run_evals)
 ├── requirements.txt
-├── pyproject.toml                 # Pytest configuration
-└── .env.example                   # API key template
+├── pyproject.toml
+└── .env.example
 ```
 
 ## Tech Stack
 
-| Component | Technology |
-|-----------|-----------|
+| Layer | Technology |
+|--------|------------|
 | Orchestration | LangGraph, LangChain |
-| Vector Store | ChromaDB (local, persistent) |
-| Embeddings | ZeroEntropy `zembed-1` (2560 dimensions) |
-| LLM / VLM | Google Gemini 3.1 Pro |
-| Retrieval | MMR with metadata filtering |
-| Frontend | Streamlit + streamlit-mermaid |
-| Testing | pytest (60+ tests across 5 phases) |
+| Vector store | ChromaDB (local, persistent) |
+| Embeddings | ZeroEntropy `zembed-1` |
+| LLMs / VLM | Google Gemini, OpenAI, Anthropic (per `config.py`) |
+| Retrieval | MMR, metadata filters (week, doc type) |
+| Frontend | Streamlit, streamlit-mermaid |
+| Evaluation | LLM judges, structural checks, matplotlib plots |
