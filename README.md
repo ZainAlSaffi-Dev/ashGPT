@@ -55,9 +55,37 @@ Reasoning is **not** tied to a single vendor. `src/llm.py` dispatches by model n
 | **Baseline** | Plain LLM (`BASELINE_MODEL`), no retrieval, no graph |
 | **Ablation** | Retrieval + synthesis only; **no** router-driven ratio or chronology nodes (`intent` fixed to `general`) |
 
-**Metrics** include LLM-as-a-judge **groundedness** (1–5) and **answer relevancy**, **context precision@K**, heuristic **Mermaid validity** and **IRAC compliance**, **latency**, **per-node latency** (agent), and **token usage**. Judging uses a **two-stage** flow (draft judge and critique judge on different providers/models where configured) to reduce self-bias.
+**Automated metrics** (besides judges): heuristic **Mermaid** structural checks, **IRAC** keyword coverage, **latency**, **per-node latency** (agent), and **token usage** (via `src/llm.py`).
 
 After a run, see `eval_results/eval_summary.json` and the generated plots. Numbers change with models, prompts, and data—re-run the suite for your report.
+
+### LLM-as-a-judge framework
+
+All judge calls go through `llm_call()` in `src/llm.py` at **temperature 0**. Each judge is instructed to return **only a JSON object**; the harness strips optional Markdown code fences around the payload and parses the result (failed parses are logged and fall back to safe defaults).
+
+Judge models are set in `src/config.py`:
+
+| Variable | Model (current default) | Provider |
+|----------|------------------------|----------|
+| `JUDGE_DRAFT_MODEL` | `gemini-3-flash-preview` | Google |
+| `JUDGE_CRITIQUE_MODEL` | `gpt-5.4` | OpenAI |
+
+**Groundedness (1–5)** — **two-stage**, cross-provider:
+
+1. **Draft (Stage 1)** — `JUDGE_DRAFT_MODEL` receives the question, the **source material** shown to the system under test, and the answer. It scores how well **factual** claims (cases, dates, statutes, holdings) are supported by those sources; **paraphrase and plain-English explanation** are allowed. It returns `{"score": int, "reasoning": str}`.
+2. **Critique (Stage 2)** — `JUDGE_CRITIQUE_MODEL` receives the same question, sources, and answer, plus the draft score and reasoning. It acts as a **senior reviewer**: agree with the draft or **override** the score if the draft was too lenient or too harsh, using the same rubric. It returns `{"score": int, "reasoning": str, "agreed_with_draft": bool}`.
+
+The **final groundedness score** recorded in results is the critique model’s `score` (with fallback to the draft score if parsing fails). Stored fields include `draft_score`, `draft_reasoning`, and `agreed_with_draft` for analysis.
+
+**Rationale:** Using **Gemini for the first pass and OpenAI for the second** reduces **same-model self-evaluation bias** (e.g. a system built mainly on OpenAI being scored only by OpenAI).
+
+**Answer relevancy (1–5)** — **single-stage**: one call using **`JUDGE_DRAFT_MODEL`** (question + answer only). Returns `{"score": int, "reasoning": str}`.
+
+**Context precision @K** — **single-stage per chunk**: for each retrieved text/slide chunk, one call using **`JUDGE_DRAFT_MODEL`** asks whether the chunk **helps** answer the question (`{"relevant": true|false}`). Precision is the fraction of chunks marked relevant.
+
+**Baseline groundedness** in the suite is judged against the **same retrieved context bundle as the full agent** for that query (the baseline model does not see that context at generation time); this measures alignment with the course KB slice, not “what the baseline had access to.”
+
+**Non-LLM structural scores** — **Mermaid validity** and **IRAC compliance** use rule-based checks over the dedicated node outputs or, when empty, over the **final answer** text (see `run_evals.py`).
 
 ## Knowledge Base
 
@@ -166,4 +194,4 @@ ashGPT/
 | LLMs / VLM | Google Gemini, OpenAI, Anthropic (per `config.py`) |
 | Retrieval | MMR, metadata filters (week, doc type) |
 | Frontend | Streamlit, streamlit-mermaid |
-| Evaluation | LLM judges, structural checks, matplotlib plots |
+| Evaluation | Two-stage groundedness judge (Gemini draft → OpenAI critique), single-stage relevancy & per-chunk precision (Gemini), structural checks, matplotlib plots |
