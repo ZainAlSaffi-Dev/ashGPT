@@ -25,8 +25,8 @@ Queries where fewer than 70% of retrieved chunks were judged relevant, indicatin
 - **Verdicts:** [True, True, True, True, True, False, True, False, True, False, False, False]
 
 ### Q: "What legal principle governs the distinction between a lease and a licence?"
-- **Precision@K:** 8% (1/12 relevant)
-- **Verdicts:** [False, True, False, False, False, False, False, False, False, False, False, False]
+- **Precision@K:** 17% (2/12 relevant)
+- **Verdicts:** [False, True, False, True, False, False, False, False, False, False, False, False]
 
 ### Q: "What is the legal test from Buckinghamshire County Council v Moran?"
 - **Precision@K:** 17% (2/12 relevant)

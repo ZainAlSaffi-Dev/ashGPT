@@ -256,6 +256,30 @@ def judge_context_precision(query: str, chunks: list[dict]) -> dict:
 # ── Mermaid.js Validity ───────────────────────────────────────────────────────
 
 
+def _extract_mermaid_from_text(text: str) -> str:
+    """Return the first fenced ```mermaid block body, or empty string."""
+    if not text:
+        return ""
+    match = re.search(r"```mermaid\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def _mermaid_for_structural_metric(dedicated: str, final_answer: str) -> str:
+    """Prefer the chronology node's diagram; else any Mermaid embedded in the final answer."""
+    d = (dedicated or "").strip()
+    if d:
+        return d
+    return _extract_mermaid_from_text(final_answer or "")
+
+
+def _irac_for_structural_metric(dedicated: str, final_answer: str) -> str:
+    """Prefer the ratio extractor artefact; else the student-facing answer (ablation / baseline)."""
+    d = (dedicated or "").strip()
+    if d:
+        return d
+    return final_answer or ""
+
+
 def check_mermaid_validity(mermaid_code: str) -> dict:
     """Check if the Mermaid diagram is structurally valid.
 
@@ -438,6 +462,10 @@ def run_ablation_no_ratio(query: str, week: str | None = None) -> dict:
         "latency_s": total_elapsed,
         "node_trace": state.get("node_trace", []),
         "source_diversity": len(all_sources),
+        "intent": state.get("intent", "general"),
+        "ratio_decidendi": state.get("ratio_decidendi", ""),
+        "irac_analysis": state.get("irac_analysis", ""),
+        "mermaid_diagram": state.get("mermaid_diagram", ""),
     }
 
 
@@ -493,17 +521,49 @@ def run_evaluation(output_dir: Path) -> dict:
         ablation_precision = judge_context_precision(query, ablation_chunks)
 
         # 8. Mermaid validity and IRAC compliance (hypothesis-specific metrics)
-        agent_mermaid = check_mermaid_validity(agent_result.get("mermaid_diagram", ""))
-        ablation_mermaid = check_mermaid_validity("")  # ablation never produces Mermaid
-        baseline_mermaid = check_mermaid_validity("")   # baseline never produces Mermaid
+        # Use dedicated node artefacts when present; otherwise score embedded content in
+        # final_answer so ablation/baseline are comparable to the full agent.
+        agent_mermaid = check_mermaid_validity(
+            _mermaid_for_structural_metric(
+                agent_result.get("mermaid_diagram", ""),
+                agent_result.get("answer", ""),
+            )
+        )
+        ablation_mermaid = check_mermaid_validity(
+            _mermaid_for_structural_metric(
+                ablation_result.get("mermaid_diagram", ""),
+                ablation_result.get("answer", ""),
+            )
+        )
+        baseline_mermaid = check_mermaid_validity(
+            _mermaid_for_structural_metric("", baseline_result.get("answer", ""))
+        )
 
-        agent_irac = check_irac_compliance(agent_result.get("irac_analysis", ""))
-        ablation_irac = check_irac_compliance("")  # ablation skips ratio extractor
-        baseline_irac = check_irac_compliance("")   # baseline has no IRAC structure
+        agent_irac = check_irac_compliance(
+            _irac_for_structural_metric(
+                agent_result.get("irac_analysis", ""),
+                agent_result.get("answer", ""),
+            )
+        )
+        ablation_irac = check_irac_compliance(
+            _irac_for_structural_metric(
+                ablation_result.get("irac_analysis", ""),
+                ablation_result.get("answer", ""),
+            )
+        )
+        baseline_irac = check_irac_compliance(
+            _irac_for_structural_metric("", baseline_result.get("answer", ""))
+        )
 
         log.info(
-            "Structural — Mermaid: Agent=%.0f%% | IRAC: Agent=%.0f%%",
-            agent_mermaid["score"] * 100, agent_irac["score"] * 100,
+            "Structural — Mermaid: Agent=%.0f%% | Ablation=%.0f%% | Baseline=%.0f%% | "
+            "IRAC: Agent=%.0f%% | Ablation=%.0f%% | Baseline=%.0f%%",
+            agent_mermaid["score"] * 100,
+            ablation_mermaid["score"] * 100,
+            baseline_mermaid["score"] * 100,
+            agent_irac["score"] * 100,
+            ablation_irac["score"] * 100,
+            baseline_irac["score"] * 100,
         )
 
         result_entry = {
