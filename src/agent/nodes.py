@@ -23,6 +23,7 @@ from src.agent.chat_memory import (
 from src.agent.state import AgentState
 from src.agent.tools import retrieve_all
 from src.config import (
+    ABLATION_MODEL,
     CHRONOLOGY_MODEL,
     RATIO_EXTRACTOR_MODEL,
     ROUTER_MODEL,
@@ -455,4 +456,132 @@ def synthesis_node(state: AgentState) -> dict:
     return {
         "final_answer": final_answer,
         "node_trace": _append_trace(state, "synthesis"),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ABLATION: MEGA-PROMPT (single LLM call — no multi-node graph)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+MEGA_PROMPT_SYSTEM = (
+    "You are an expert Australian Property Law tutor. You will be given a student "
+    "question and retrieved source material. Produce a response with the sections below.\n\n"
+    # ── Section 1: IRAC ──────────────────────────────────────────────────────
+    "## SECTION 1 — IRAC ANALYSIS\n"
+    "Provide a full IRAC analysis structured with these exact headings:\n"
+    "- **Issue**: The legal question the court had to decide.\n"
+    "- **Rule**: The ratio decidendi — the binding legal principle.\n"
+    "- **Application**: How the court applied the rule to the facts.\n"
+    "- **Conclusion**: The court's decision.\n\n"
+    "Start this section with a one-sentence statement of the ratio decidendi on its own "
+    "line prefixed with 'Ratio Decidendi:'\n\n"
+    # ── Section 2: Mermaid diagram (conditional) ─────────────────────────────
+    "## SECTION 2 — CHRONOLOGICAL FLOWCHART (conditional)\n"
+    "Evaluate the student's query. If the query asks for a timeline, "
+    "sequence of events, chain of events, flowchart, 'who did what', or 'what happened',"
+    "output a valid Mermaid.js `graph TD` diagram here.\n\n"
+    "When a diagram is required, follow these formatting rules:\n"
+    "- Use `graph TD` (top-down) direction.\n"
+    "- Node IDs must be camelCase (no spaces): e.g. `ownerDies`, `titlePasses`.\n"
+    "- Keep node labels SHORT — maximum 8-10 words. Put dates at the start.\n"
+    "  GOOD: `e1[\"1881: Clissold enters possession\"]`\n"
+    "  BAD:  `e1[\"1881: Frederick Clissold enters into possession of the land\"]`\n"
+    "- Put extra detail on edge labels: `e1 -->|\"encloses land, pays rates\"| e2`\n"
+    "- Use curly brackets for decision nodes: `d1{\"Owner consents?\"}`\n"
+    "- Use subgraphs to group related phases.\n"
+    "- Wrap ALL labels in double quotes.\n"
+    "- Do NOT use the keyword `end` as a node ID.\n"
+    "- Aim for 5-12 nodes total.\n\n"
+    "Format a diagram as:\n"
+    "```mermaid\n<your flowchart>\n```\n\n"
+    # ── Section 3: Summary ───────────────────────────────────────────────────
+    "## SECTION 3 — PLAIN-ENGLISH SUMMARY\n"
+    "Provide a concise plain-English explanation that answers the student's question "
+    "directly, drawing on the IRAC analysis and any diagram above. Use inline citations "
+    "where you rely on specific sources, e.g. (Source: Readings Week 3). Structure "
+    "your answer with headings and paragraphs.\n\n"
+    # ── Grounding rules ──────────────────────────────────────────────────────
+    "GROUNDING RULES (apply to all sections):\n"
+    "- ALL case names, dates, statutory references, legal tests, and holdings MUST "
+    "appear in the provided source material. Do NOT invent facts.\n"
+    "- Explanations and paraphrasing are encouraged — you are a tutor.\n"
+    "- If sources are insufficient, say so explicitly rather than filling gaps.\n"
+    "- If CONVERSATION HISTORY is provided, use it only to resolve pronouns and "
+    "follow-up references; all legal facts must still come from the sources."
+)
+
+
+def mega_prompt_node(state: AgentState) -> dict:
+    """Single-LLM ablation: retrieval context → one call produces IRAC + Mermaid + summary.
+
+    Bypasses the router and all specialised reasoning nodes. Used to measure
+    whether the multi-node LangGraph architecture adds value over a single
+    consolidated prompt.
+
+    Reads:  query, retrieved_texts, retrieved_slides, chat_history
+    Writes: ratio_decidendi, irac_analysis, mermaid_diagram, chronology_summary,
+            final_answer, node_trace
+    """
+    query = state["query"]
+    context = _format_context(state)
+    history = get_chat_history(state)
+    hist_block = (
+        f"CONVERSATION HISTORY:\n{format_transcript_for_llm(history)}\n\n"
+        if history
+        else ""
+    )
+
+    prompt = (
+        f"{hist_block}"
+        f"STUDENT QUESTION: {query}\n\n"
+        f"SOURCE MATERIAL:\n{context}\n\n"
+        "Using only the source material above, produce all three sections as instructed."
+    )
+
+    log.info("MegaPromptNode: single consolidated LLM call (ablation)")
+    response = llm_call(prompt, model=ABLATION_MODEL, system_instruction=MEGA_PROMPT_SYSTEM)
+
+    # ── Parse ratio decidendi ─────────────────────────────────────────────────
+    ratio_line = ""
+    for line in response.split("\n"):
+        if line.strip().lower().startswith("ratio decidendi:"):
+            ratio_line = line.split(":", 1)[-1].strip().lstrip("#*- ")
+            break
+    if not ratio_line:
+        for line in response.split("\n"):
+            if "ratio" in line.lower() and "decidendi" in line.lower():
+                ratio_line = line.strip().lstrip("#*- ")
+                break
+
+    # ── Parse IRAC block (Section 1) ─────────────────────────────────────────
+    irac_match = re.search(
+        r"(?:##\s*SECTION\s*1[^\n]*\n)(.*?)(?=##\s*SECTION\s*2|```mermaid|\Z)",
+        response,
+        re.DOTALL | re.IGNORECASE,
+    )
+    irac_analysis = irac_match.group(1).strip() if irac_match else ""
+
+    # ── Parse Mermaid block (Section 2) ──────────────────────────────────────
+    mermaid_match = re.search(r"```mermaid\s*\n(.*?)```", response, re.DOTALL)
+    mermaid_diagram = mermaid_match.group(1).strip() if mermaid_match else ""
+    if not mermaid_diagram:
+        log.warning("MegaPromptNode: no Mermaid block found in response")
+
+    # ── Parse plain-English summary (Section 3) ───────────────────────────────
+    summary_match = re.search(
+        r"(?:##\s*SECTION\s*3[^\n]*\n)(.*)",
+        response,
+        re.DOTALL | re.IGNORECASE,
+    )
+    chronology_summary = summary_match.group(1).strip() if summary_match else ""
+
+    # final_answer = full response (UI can render any embedded mermaid block)
+    return {
+        "ratio_decidendi": ratio_line,
+        "irac_analysis": irac_analysis,
+        "mermaid_diagram": mermaid_diagram,
+        "chronology_summary": chronology_summary,
+        "final_answer": response,
+        "node_trace": _append_trace(state, "mega_prompt"),
     }

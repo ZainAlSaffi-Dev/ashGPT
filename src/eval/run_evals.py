@@ -2,7 +2,7 @@
 
 Compares the full agent pipeline against:
   1. A plain LLM baseline (no retrieval, no graph nodes)
-  2. Ablated variant (retrieval + synthesis only, no specialised reasoning nodes)
+  2. Mega-prompt ablation (retrieval + single consolidated LLM call replacing all nodes)
 
 Eval cases are defined in ``EVAL_CASES``: each has a **query_family** tag
 (`factual_retrieval`, `cross_modal_retrieval`, `analytical_synthesis`,
@@ -49,6 +49,7 @@ from src.agent.chat_memory import prepare_chat_history_for_run
 from src.agent.nodes import (
     _format_context,
     chronology_node,
+    mega_prompt_node,
     ratio_extractor_node,
     retrieval_node,
     router_node,
@@ -314,7 +315,7 @@ def _run_ablation_turns_for_eval(case: EvalCase, week: str | None = None) -> dic
     last: dict = {}
     for turn in case["user_turns"]:
         prior = prepare_chat_history_for_run(history) if history else None
-        last = run_ablation_no_ratio(turn, week=week, chat_history=prior)
+        last = run_ablation_mega_prompt(turn, week=week, chat_history=prior)
         history.append({"role": "user", "content": turn})
         history.append({"role": "assistant", "content": last.get("answer", "")})
     last["conversation_turns"] = list(case["user_turns"])
@@ -775,18 +776,22 @@ def run_baseline(query: str) -> dict:
     }
 
 
-# ── Ablation: Retrieval + Synthesis Only ──────────────────────────────────────
+# ── Ablation: Mega-Prompt (single consolidated LLM call) ──────────────────────
 
 
-def run_ablation_no_ratio(
+def run_ablation_mega_prompt(
     query: str,
     week: str | None = None,
     chat_history: list[dict[str, str]] | None = None,
 ) -> dict:
-    """Run retrieval + synthesis only, skipping all specialised reasoning nodes."""
+    """Run retrieval then a single mega-prompt LLM call, bypassing the LangGraph router.
+
+    Tests whether one consolidated prompt can match the quality of the full
+    multi-node pipeline for IRAC extraction, Mermaid generation, and synthesis.
+    """
     total_start = time.time()
 
-    state: AgentState = {"query": query, "intent": "general"}
+    state: AgentState = {"query": query, "intent": "summary"}
     if week:
         state["week_filter"] = week
     prepared = prepare_chat_history_for_run(chat_history)
@@ -794,7 +799,7 @@ def run_ablation_no_ratio(
         state["chat_history"] = prepared
 
     state.update(retrieval_node(state))
-    state.update(synthesis_node(state))
+    state.update(mega_prompt_node(state))
 
     total_elapsed = round(time.time() - total_start, 2)
 
@@ -810,7 +815,7 @@ def run_ablation_no_ratio(
         "latency_s": total_elapsed,
         "node_trace": state.get("node_trace", []),
         "source_diversity": len(all_sources),
-        "intent": state.get("intent", "general"),
+        "intent": state.get("intent", "summary"),
         "ratio_decidendi": state.get("ratio_decidendi", ""),
         "irac_analysis": state.get("irac_analysis", ""),
         "mermaid_diagram": state.get("mermaid_diagram", ""),
@@ -855,9 +860,9 @@ def run_evaluation(output_dir: Path, *, retrieval_pool_eval: bool = False) -> di
         baseline_result["token_usage"] = get_token_usage().summary()
 
         reset_token_usage()
-        log.info("Running: ablation (no reasoning nodes)")
+        log.info("Running: ablation (mega-prompt, single LLM call)")
         if len(case["user_turns"]) == 1:
-            ablation_result = run_ablation_no_ratio(case["user_turns"][0])
+            ablation_result = run_ablation_mega_prompt(case["user_turns"][0])
         else:
             ablation_result = _run_ablation_turns_for_eval(case)
         ablation_result["token_usage"] = get_token_usage().summary()
@@ -962,7 +967,7 @@ def run_evaluation(output_dir: Path, *, retrieval_pool_eval: bool = False) -> di
                 "mermaid_validity": baseline_mermaid,
                 "irac_compliance": baseline_irac,
             },
-            "ablation_no_ratio": {
+            "ablation_mega_prompt": {
                 **ablation_result,
                 "groundedness": ablation_ground,
                 "answer_relevancy": ablation_relevancy,
@@ -1015,7 +1020,7 @@ def run_evaluation(output_dir: Path, *, retrieval_pool_eval: bool = False) -> di
 
 def _compute_summary(results: list[dict]) -> dict:
     """Compute aggregate metrics from evaluation results."""
-    configs = ["agent", "baseline", "ablation_no_ratio"]
+    configs = ["agent", "baseline", "ablation_mega_prompt"]
     summary = {}
 
     for config in configs:
@@ -1241,19 +1246,19 @@ def _generate_failure_analysis(results: list[dict], output_dir: Path) -> None:
     # ── 2. Agent scored lower than ablation ────────────────────────────────
     ablation_wins = [
         r for r in results
-        if r["ablation_no_ratio"]["groundedness"]["score"] > r["agent"]["groundedness"]["score"]
+        if r["ablation_mega_prompt"]["groundedness"]["score"] > r["agent"]["groundedness"]["score"]
     ]
     lines.append("## 2. Ablation Outperformed Agent")
     lines.append("")
     lines.append(
-        "Cases where removing the Ratio Extractor improved groundedness, "
-        "suggesting the node introduced unverifiable inferences."
+        "Cases where the single mega-prompt outperformed the full agent on groundedness, "
+        "suggesting the multi-node pipeline introduced unverifiable inferences on those queries."
     )
     lines.append("")
     if ablation_wins:
         for r in ablation_wins:
             agent_s = r["agent"]["groundedness"]["score"]
-            ablation_s = r["ablation_no_ratio"]["groundedness"]["score"]
+            ablation_s = r["ablation_mega_prompt"]["groundedness"]["score"]
             agent_reason = r["agent"]["groundedness"]["reasoning"]
             lines.append(f"### Q: \"{r['query']}\"")
             lines.append(f"- **Agent:** {agent_s}/5 | **Ablation:** {ablation_s}/5")
@@ -1358,8 +1363,8 @@ def _generate_failure_analysis(results: list[dict], output_dir: Path) -> None:
 
 def _generate_plots(results: list[dict], summary: dict, output_dir: Path) -> None:
     """Generate comparison plots and save as PNG."""
-    configs = ["agent", "baseline", "ablation_no_ratio"]
-    labels = ["Full Agent", "Plain LLM\n(Baseline)", "No Ratio\n(Ablation)"]
+    configs = ["agent", "baseline", "ablation_mega_prompt"]
+    labels = ["Full Agent", "Plain LLM\n(Baseline)", "Mega-Prompt\n(Ablation)"]
 
     # 1. Groundedness comparison
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -1390,8 +1395,8 @@ def _generate_plots(results: list[dict], summary: dict, output_dir: Path) -> Non
     plt.close()
 
     # 3. Context precision comparison (agent and ablation only)
-    retrieval_configs = ["agent", "ablation_no_ratio"]
-    retrieval_labels = ["Full Agent\n(MMR)", "No Ratio\n(Ablation)"]
+    retrieval_configs = ["agent", "ablation_mega_prompt"]
+    retrieval_labels = ["Full Agent\n(MMR)", "Mega-Prompt\n(Ablation)"]
     precisions = [summary[c].get("avg_context_precision", 0) for c in retrieval_configs]
     if any(p > 0 for p in precisions):
         fig, ax = plt.subplots(figsize=(8, 5))
@@ -1418,9 +1423,9 @@ def _generate_plots(results: list[dict], summary: dict, output_dir: Path) -> Non
                 summary["agent"]["avg_ndcg_at_k"],
             ]
             ab_vals = [
-                summary["ablation_no_ratio"]["avg_mrr"],
-                summary["ablation_no_ratio"]["avg_hit_at_k"],
-                summary["ablation_no_ratio"]["avg_ndcg_at_k"],
+                summary["ablation_mega_prompt"]["avg_mrr"],
+                summary["ablation_mega_prompt"]["avg_hit_at_k"],
+                summary["ablation_mega_prompt"]["avg_ndcg_at_k"],
             ]
             ax.bar([i - width / 2 for i in xw], agent_vals, width, label="Full Agent", color="#2563eb", edgecolor="black")
             ax.bar([i + width / 2 for i in xw], ab_vals, width, label="Ablation", color="#f59e0b", edgecolor="black")
@@ -1628,7 +1633,7 @@ def main() -> None:
     print("  EVALUATION SUMMARY")
     print("=" * 60)
     by_fam = summary.pop("by_query_family", {})
-    for config in ("agent", "baseline", "ablation_no_ratio"):
+    for config in ("agent", "baseline", "ablation_mega_prompt"):
         metrics = summary[config]
         print(f"\n  {config}:")
         print(f"    Avg Groundedness:       {metrics['avg_groundedness']}/5.0")
@@ -1637,9 +1642,9 @@ def main() -> None:
         print(f"    Avg IRAC Compliance:    {metrics['avg_irac_compliance']*100:.0f}%")
         if "avg_context_precision" in metrics:
             print(f"    Avg Context Precision:  {metrics['avg_context_precision']}")
-        if config in ("agent", "ablation_no_ratio") and "avg_mrr" in metrics:
+        if config in ("agent", "ablation_mega_prompt") and "avg_mrr" in metrics:
             print(f"    Avg MRR / Hit@K / NDCG: {metrics['avg_mrr']} / {metrics['avg_hit_at_k']} / {metrics['avg_ndcg_at_k']}")
-        if config in ("agent", "ablation_no_ratio") and metrics.get("avg_recall_vs_pool") is not None:
+        if config in ("agent", "ablation_mega_prompt") and metrics.get("avg_recall_vs_pool") is not None:
             print(f"    Avg recall vs pool:     {metrics['avg_recall_vs_pool']}")
         print(f"    Avg Latency:            {metrics['avg_latency_s']}s")
         print(f"    Avg Source Diversity:    {metrics['avg_source_diversity']}")

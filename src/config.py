@@ -21,6 +21,7 @@ SYNTHESIS_MODEL = "gpt-5.4-mini"                 # Strong: final grounded answer
 
 # ── Evaluation ─────────────────────────────────────────────────────────────────
 BASELINE_MODEL = "gpt-5.4-mini"             # Plain LLM baseline (no retrieval)
+ABLATION_MODEL = "gpt-5.4-mini"             # Mega-prompt ablation (single LLM call replaces all nodes)
 
 JUDGE_DRAFT_MODEL = "gemini-3-flash-preview"  # Stage 1: initial judgment (different provider to avoid bias)
 JUDGE_CRITIQUE_MODEL = "gpt-5.4"            # Stage 2: critiques and finalises score
