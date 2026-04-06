@@ -213,3 +213,4 @@ data/
 chroma_db/
 
 # Evaluation outputs
+.cursorrules
