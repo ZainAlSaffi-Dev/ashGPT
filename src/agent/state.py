@@ -62,5 +62,11 @@ class AgentState(TypedDict, total=False):
     # ── Synthesis output ───────────────────────────────────────────────────
     final_answer: str
 
+    # ── Verification node output ───────────────────────────────────────────
+    verification_report: dict
+
+    # ── Ablation overrides (set by the eval harness; agent reads if present) ─
+    use_reranker: bool  # if absent, retrieval_node falls back to USE_RERANKER
+
     # ── Diagnostics (for evaluation / ablation) ────────────────────────────
     node_trace: list[str]

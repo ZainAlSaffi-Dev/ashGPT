@@ -54,6 +54,7 @@ from src.agent.nodes import (
     retrieval_node,
     router_node,
     synthesis_node,
+    verification_node,
 )
 from src.agent.state import AgentState
 from src.agent.tools import retrieve_all
@@ -63,6 +64,7 @@ from src.config import (
     EVAL_RETRIEVAL_POOL_K_TEXT,
     JUDGE_CRITIQUE_MODEL,
     JUDGE_DRAFT_MODEL,
+    USE_VERIFICATION,
 )
 from src.llm import get_token_usage, llm_call, reset_token_usage
 
@@ -259,6 +261,71 @@ EVAL_CASES: list[EvalCase] = [
             "chattel was found on the ground rather than handed over? Explain briefly.",
         ],
     },
+    # ── Expansion (v2): seven additional cases for statistical power ──────────
+    {
+        "case_id": "fact_fee_tail_vs_simple",
+        "query_family": "factual_retrieval",
+        "rationale": "Comparative doctrine question — should retrieve estate-type readings.",
+        "user_turns": [
+            "What is the difference between a fee tail and a fee simple in our materials?",
+        ],
+    },
+    {
+        "case_id": "fact_pla_chattels",
+        "query_family": "factual_retrieval",
+        "rationale": "Statute lookup — Property Law Act 1974 (Qld) on chattels.",
+        "user_turns": [
+            "What does the Property Law Act 1974 (Qld) say about chattels in the readings?",
+        ],
+    },
+    {
+        "case_id": "xmodal_torrens_indefeasibility",
+        "query_family": "cross_modal_retrieval",
+        "rationale": "Targets lecture slides on Torrens indefeasibility — VLM-described content.",
+        "user_turns": [
+            "Looking at the indexed lecture slides on the Torrens system, how do those "
+            "materials present the doctrine of indefeasibility of title?",
+        ],
+    },
+    {
+        "case_id": "xmodal_bailment_categories",
+        "query_family": "cross_modal_retrieval",
+        "rationale": "Slide-anchored taxonomy: bailment categories from lecture deck.",
+        "user_turns": [
+            "From the lecture slides indexed in the knowledge base, what categories "
+            "of bailment do those materials describe?",
+        ],
+    },
+    {
+        "case_id": "anal_legal_vs_equitable_interests",
+        "query_family": "analytical_synthesis",
+        "rationale": "Comparison across multiple chunks of equitable vs legal interests.",
+        "user_turns": [
+            "Using multiple chunks of the indexed sources, compare equitable interests "
+            "with legal interests in property: how do they arise, and how do they bind "
+            "third parties?",
+        ],
+    },
+    {
+        "case_id": "anal_torrens_title_passing",
+        "query_family": "analytical_synthesis",
+        "rationale": "Sequenced reasoning: passage of legal title in a Torrens transfer.",
+        "user_turns": [
+            "Sequence the steps by which legal title passes in a Torrens-system land "
+            "transfer, citing the indexed course materials at each step.",
+        ],
+    },
+    {
+        "case_id": "conv_lease_three_turn",
+        "query_family": "conversational_followup",
+        "rationale": "Three-turn case where the third turn references the second.",
+        "user_turns": [
+            "What are the essential characteristics of a lease in our indexed materials?",
+            "Now contrast a lease with a licence in one paragraph, again from the sources.",
+            "Which of those points you just made would change if the licence were "
+            "irrevocable? Stay within our indexed sources only.",
+        ],
+    },
 ]
 
 
@@ -297,13 +364,22 @@ def _cross_modal_signals(result: dict) -> dict:
     }
 
 
-def _run_agent_turns_for_eval(case: EvalCase, week: str | None = None) -> dict:
+def _run_agent_turns_for_eval(
+    case: EvalCase,
+    week: str | None = None,
+    use_reranker: bool | None = None,
+) -> dict:
     """Run the full agent for each user turn; return metrics dict for the final turn."""
     history: list[dict[str, str]] = []
     last: dict = {}
     for turn in case["user_turns"]:
         prior = prepare_chat_history_for_run(history) if history else None
-        last = run_agent_with_metrics(turn, week=week, chat_history=prior)
+        last = run_agent_with_metrics(
+            turn,
+            week=week,
+            chat_history=prior,
+            use_reranker=use_reranker,
+        )
         history.append({"role": "user", "content": turn})
         history.append({"role": "assistant", "content": last.get("answer", "")})
     last["conversation_turns"] = list(case["user_turns"])
@@ -648,13 +724,39 @@ def check_mermaid_validity(mermaid_code: str) -> dict:
 # ── IRAC Structural Compliance ───────────────────────────────────────────────
 
 
-def check_irac_compliance(irac_text: str) -> dict:
+# Intents for which IRAC structure is not expected.
+# - "chronology": the answer is a Mermaid timeline; IRAC headings would be noise.
+# - "general":    greetings / off-topic / non-legal — IRAC is not applicable.
+_IRAC_NA_INTENTS = {"chronology", "general"}
+
+
+def check_irac_compliance(irac_text: str, intent: str | None = None) -> dict:
     """Check if the IRAC analysis contains all four required components.
 
-    Looks for Issue, Rule, Application, and Conclusion sections.
+    Returns ``{"applicable": False, "score": None, ...}`` when the router's
+    intent is one of :data:`_IRAC_NA_INTENTS` — these queries are not
+    expected to produce an IRAC analysis, so a score of zero would unfairly
+    drag the average down. The summary computation excludes ``None`` scores
+    from the per-config IRAC average and reports a separate
+    ``irac_applicable_count`` for transparency.
     """
+    if intent in _IRAC_NA_INTENTS:
+        return {
+            "compliant": None,
+            "score": None,
+            "applicable": False,
+            "components": {},
+            "reason": f"IRAC not applicable for intent={intent!r}",
+        }
+
     if not irac_text or not irac_text.strip():
-        return {"compliant": False, "score": 0.0, "reason": "No IRAC analysis produced", "components": {}}
+        return {
+            "compliant": False,
+            "score": 0.0,
+            "applicable": True,
+            "components": {},
+            "reason": "No IRAC analysis produced",
+        }
 
     components = {
         "issue": bool(re.search(r"\b(issue|legal question)\b", irac_text, re.IGNORECASE)),
@@ -670,6 +772,7 @@ def check_irac_compliance(irac_text: str) -> dict:
     return {
         "compliant": passed == total,
         "score": score,
+        "applicable": True,
         "components": components,
         "reason": f"IRAC {passed}/{total} components found",
     }
@@ -686,6 +789,50 @@ def _run_node(node_fn, state: AgentState) -> tuple[dict, float]:
     return result, round(elapsed, 2)
 
 
+# ── Live verification counters (visible in INFO logs during a run) ────────────
+
+
+class _VerificationCounters:
+    """Module-scoped live counter for the verification node.
+
+    The eval logs a one-line ``[verification]`` summary after every case so
+    you can see hallucination interception in real time, e.g.:
+        [verification] case 7/22 fired=7 rewrites=2 unsupported_total=3
+    """
+
+    def __init__(self) -> None:
+        self.cases_seen = 0
+        self.fired = 0
+        self.rewrites_applied = 0
+        self.unsupported_total = 0
+
+    def record(self, case_index: int, total_cases: int, agent_result: dict) -> None:
+        self.cases_seen += 1
+        report = agent_result.get("verification_report") or {}
+        if "verification" in agent_result.get("node_trace", []):
+            self.fired += 1
+        if report.get("rewrites_applied"):
+            self.rewrites_applied += 1
+        self.unsupported_total += len(report.get("unsupported_claims", []) or [])
+
+        log.info(
+            "[verification] case %d/%d fired=%d rewrites=%d unsupported_total=%d",
+            case_index,
+            total_cases,
+            self.fired,
+            self.rewrites_applied,
+            self.unsupported_total,
+        )
+
+
+_verification_counters = _VerificationCounters()
+
+
+def get_verification_counters() -> _VerificationCounters:
+    """Expose the singleton for tests / external inspection."""
+    return _verification_counters
+
+
 # ── Full Agent Run with Per-Node Metrics ──────────────────────────────────────
 
 
@@ -693,14 +840,21 @@ def run_agent_with_metrics(
     query: str,
     week: str | None = None,
     chat_history: list[dict[str, str]] | None = None,
+    use_reranker: bool | None = None,
 ) -> dict:
-    """Run the full agent pipeline with per-node latency tracking."""
+    """Run the full agent pipeline with per-node latency tracking.
+
+    ``use_reranker`` overrides the global config (used for the
+    ``ablation_no_reranker`` configuration).
+    """
     node_latencies: dict[str, float] = {}
     total_start = time.time()
 
     state: AgentState = {"query": query}
     if week:
         state["week_filter"] = week
+    if use_reranker is not None:
+        state["use_reranker"] = bool(use_reranker)
     prepared = prepare_chat_history_for_run(chat_history)
     if prepared:
         state["chat_history"] = prepared
@@ -729,6 +883,24 @@ def run_agent_with_metrics(
     state.update(result)
     node_latencies["synthesis"] = lat
 
+    # ── Verification (post-synthesis fact-check) ──────────────────────────────
+    # Mirrors the compiled graph: synthesis → verification → END. Without this
+    # call the eval would silently bypass the verification node — the compiled
+    # graph in graph.py still wires it, but ``run_agent_with_metrics`` builds
+    # its own pipeline for per-node latency tracking, so we must invoke it
+    # explicitly here.
+    if USE_VERIFICATION:
+        result, lat = _run_node(verification_node, state)
+        state.update(result)
+        node_latencies["verification"] = lat
+        report = state.get("verification_report") or {}
+        if report.get("rewrites_applied"):
+            log.info(
+                "VerificationNode: rewrote %d unsupported citation(s): %s",
+                len(report.get("unsupported_claims", []) or []),
+                report.get("unsupported_claims", []),
+            )
+
     total_elapsed = round(time.time() - total_start, 2)
 
     texts = state.get("retrieved_texts", [])
@@ -743,6 +915,7 @@ def run_agent_with_metrics(
         "latency_s": total_elapsed,
         "node_latencies": node_latencies,
         "node_trace": state.get("node_trace", []),
+        "verification_report": state.get("verification_report"),
         "source_diversity": len(all_sources),
         "intent": intent,
         "ratio_decidendi": state.get("ratio_decidendi", ""),
@@ -833,6 +1006,9 @@ def run_evaluation(output_dir: Path, *, retrieval_pool_eval: bool = False) -> di
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     all_results: list[dict] = []
+    # Reset the live verification counter so re-runs in the same process
+    # start from zero rather than accumulating across runs.
+    _verification_counters.__init__()
 
     for i, case in enumerate(EVAL_CASES):
         last_q = _eval_case_last_turn(case)
@@ -854,6 +1030,9 @@ def run_evaluation(output_dir: Path, *, retrieval_pool_eval: bool = False) -> di
             agent_result = _run_agent_turns_for_eval(case)
         agent_result["token_usage"] = get_token_usage().summary()
 
+        # Live verification telemetry (cumulative one-liner, INFO level).
+        _verification_counters.record(i + 1, len(EVAL_CASES), agent_result)
+
         reset_token_usage()
         log.info("Running: baseline LLM (final turn only)")
         baseline_result = run_baseline(last_q)
@@ -867,33 +1046,54 @@ def run_evaluation(output_dir: Path, *, retrieval_pool_eval: bool = False) -> di
             ablation_result = _run_ablation_turns_for_eval(case)
         ablation_result["token_usage"] = get_token_usage().summary()
 
+        # ── Configuration 4: full agent with reranker disabled ──
+        reset_token_usage()
+        log.info("Running: ablation_no_reranker (full agent, USE_RERANKER=False)")
+        if len(case["user_turns"]) == 1:
+            ablation_no_rr_result = run_agent_with_metrics(
+                case["user_turns"][0], use_reranker=False
+            )
+        else:
+            ablation_no_rr_result = _run_agent_turns_for_eval(case, use_reranker=False)
+        ablation_no_rr_result["token_usage"] = get_token_usage().summary()
+
         # 4. Extract context and chunks before popping
         agent_context = agent_result.pop("context")
         agent_chunks = agent_result.pop("retrieved_chunks")
         ablation_context = ablation_result.pop("context")
         ablation_chunks = ablation_result.pop("retrieved_chunks")
+        ablation_no_rr_context = ablation_no_rr_result.pop("context")
+        ablation_no_rr_chunks = ablation_no_rr_result.pop("retrieved_chunks")
 
         # 5. Judge groundedness (judge_q includes multi-turn framing where needed)
         log.info("Judging groundedness...")
         agent_ground = judge_groundedness(judge_q, agent_context, agent_result["answer"])
         baseline_ground = judge_groundedness(judge_q, agent_context, baseline_result["answer"])
         ablation_ground = judge_groundedness(judge_q, ablation_context, ablation_result["answer"])
+        ablation_no_rr_ground = judge_groundedness(
+            judge_q, ablation_no_rr_context, ablation_no_rr_result["answer"]
+        )
 
         # 6. Judge answer relevancy
         log.info("Judging answer relevancy...")
         agent_relevancy = judge_answer_relevancy(judge_q, agent_result["answer"])
         baseline_relevancy = judge_answer_relevancy(judge_q, baseline_result["answer"])
         ablation_relevancy = judge_answer_relevancy(judge_q, ablation_result["answer"])
+        ablation_no_rr_relevancy = judge_answer_relevancy(
+            judge_q, ablation_no_rr_result["answer"]
+        )
 
         # 7. Retrieval metrics (relevance of chunks to the **final** user utterance)
         if retrieval_pool_eval:
             log.info("Judging retrieval (expanded pool — slow)...")
             agent_precision = judge_context_precision_with_pool(last_q, week=None)
             ablation_precision = judge_context_precision_with_pool(last_q, week=None)
+            ablation_no_rr_precision = judge_context_precision_with_pool(last_q, week=None)
         else:
             log.info("Judging context precision + ranking (production chunks)...")
             agent_precision = judge_context_precision(last_q, agent_chunks)
             ablation_precision = judge_context_precision(last_q, ablation_chunks)
+            ablation_no_rr_precision = judge_context_precision(last_q, ablation_no_rr_chunks)
 
         # 8. Mermaid validity and IRAC compliance (hypothesis-specific metrics)
         # Use dedicated node artefacts when present; otherwise score embedded content in
@@ -914,11 +1114,16 @@ def run_evaluation(output_dir: Path, *, retrieval_pool_eval: bool = False) -> di
             _mermaid_for_structural_metric("", baseline_result.get("answer", ""))
         )
 
+        agent_intent = agent_result.get("intent")
+        ablation_no_rr_intent = ablation_no_rr_result.get("intent")
+        # Mega-prompt and baseline have no router; treat as IRAC-applicable
+        # (they always produce a single legal answer, no chronology branch).
         agent_irac = check_irac_compliance(
             _irac_for_structural_metric(
                 agent_result.get("irac_analysis", ""),
                 agent_result.get("answer", ""),
-            )
+            ),
+            intent=agent_intent,
         )
         ablation_irac = check_irac_compliance(
             _irac_for_structural_metric(
@@ -930,15 +1135,33 @@ def run_evaluation(output_dir: Path, *, retrieval_pool_eval: bool = False) -> di
             _irac_for_structural_metric("", baseline_result.get("answer", ""))
         )
 
+        ablation_no_rr_mermaid = check_mermaid_validity(
+            _mermaid_for_structural_metric(
+                ablation_no_rr_result.get("mermaid_diagram", ""),
+                ablation_no_rr_result.get("answer", ""),
+            )
+        )
+        ablation_no_rr_irac = check_irac_compliance(
+            _irac_for_structural_metric(
+                ablation_no_rr_result.get("irac_analysis", ""),
+                ablation_no_rr_result.get("answer", ""),
+            ),
+            intent=ablation_no_rr_intent,
+        )
+
+        def _fmt_pct(d: dict) -> str:
+            s = d.get("score")
+            return "n/a" if s is None else f"{s * 100:.0f}%"
+
         log.info(
-            "Structural — Mermaid: Agent=%.0f%% | Ablation=%.0f%% | Baseline=%.0f%% | "
-            "IRAC: Agent=%.0f%% | Ablation=%.0f%% | Baseline=%.0f%%",
-            agent_mermaid["score"] * 100,
-            ablation_mermaid["score"] * 100,
-            baseline_mermaid["score"] * 100,
-            agent_irac["score"] * 100,
-            ablation_irac["score"] * 100,
-            baseline_irac["score"] * 100,
+            "Structural — Mermaid: Agent=%s | Ablation=%s | Baseline=%s | "
+            "IRAC: Agent=%s | Ablation=%s | Baseline=%s",
+            _fmt_pct(agent_mermaid),
+            _fmt_pct(ablation_mermaid),
+            _fmt_pct(baseline_mermaid),
+            _fmt_pct(agent_irac),
+            _fmt_pct(ablation_irac),
+            _fmt_pct(baseline_irac),
         )
 
         cross_modal_block: dict | None = None
@@ -974,6 +1197,14 @@ def run_evaluation(output_dir: Path, *, retrieval_pool_eval: bool = False) -> di
                 "context_precision": ablation_precision,
                 "mermaid_validity": ablation_mermaid,
                 "irac_compliance": ablation_irac,
+            },
+            "ablation_no_reranker": {
+                **ablation_no_rr_result,
+                "groundedness": ablation_no_rr_ground,
+                "answer_relevancy": ablation_no_rr_relevancy,
+                "context_precision": ablation_no_rr_precision,
+                "mermaid_validity": ablation_no_rr_mermaid,
+                "irac_compliance": ablation_no_rr_irac,
             },
         }
         if cross_modal_block is not None:
@@ -1015,12 +1246,20 @@ def run_evaluation(output_dir: Path, *, retrieval_pool_eval: bool = False) -> di
     # Generate failure analysis
     _generate_failure_analysis(all_results, output_dir)
 
+    # Emit human spot-check scaffolding (qualitative validation of LLM judges)
+    _human_spot_check_log(all_results, output_dir)
+
     return summary
 
 
 def _compute_summary(results: list[dict]) -> dict:
     """Compute aggregate metrics from evaluation results."""
-    configs = ["agent", "baseline", "ablation_mega_prompt"]
+    # Include the new ``ablation_no_reranker`` configuration when present.
+    base_configs = ["agent", "baseline", "ablation_mega_prompt"]
+    if results and "ablation_no_reranker" in results[0]:
+        configs = base_configs + ["ablation_no_reranker"]
+    else:
+        configs = base_configs
     summary = {}
 
     for config in configs:
@@ -1030,19 +1269,30 @@ def _compute_summary(results: list[dict]) -> dict:
         diversities = [r[config].get("source_diversity", 0) for r in results]
 
         mermaid_scores = [r[config]["mermaid_validity"]["score"] for r in results]
-        irac_scores = [r[config]["irac_compliance"]["score"] for r in results]
+        # IRAC scores may be None when the router intent is "chronology" or
+        # "general" (IRAC structure is not expected). Exclude those from the
+        # average and report counts separately.
+        irac_scores_raw = [r[config]["irac_compliance"]["score"] for r in results]
+        irac_scores_applicable = [s for s in irac_scores_raw if s is not None]
+        irac_avg = (
+            round(sum(irac_scores_applicable) / len(irac_scores_applicable), 2)
+            if irac_scores_applicable
+            else 0.0
+        )
 
         entry = {
             "avg_groundedness": round(sum(scores) / len(scores), 2),
             "avg_answer_relevancy": round(sum(relevancies) / len(relevancies), 2),
             "avg_mermaid_validity": round(sum(mermaid_scores) / len(mermaid_scores), 2),
-            "avg_irac_compliance": round(sum(irac_scores) / len(irac_scores), 2),
+            "avg_irac_compliance": irac_avg,
+            "irac_applicable_count": len(irac_scores_applicable),
+            "irac_not_applicable_count": len(irac_scores_raw) - len(irac_scores_applicable),
             "avg_latency_s": round(sum(latencies) / len(latencies), 2),
             "avg_source_diversity": round(sum(diversities) / len(diversities), 2),
             "groundedness_scores": scores,
             "answer_relevancy_scores": relevancies,
             "mermaid_scores": mermaid_scores,
-            "irac_scores": irac_scores,
+            "irac_scores": irac_scores_raw,
             "latencies": latencies,
         }
 
@@ -1338,6 +1588,36 @@ def _generate_failure_analysis(results: list[dict], output_dir: Path) -> None:
         lines.append("The agent matched or outperformed the baseline on all queries.")
         lines.append("")
 
+    # ── 5b. Reranker contribution: agent vs ablation_no_reranker ───────────
+    if results and "ablation_no_reranker" in results[0]:
+        reranker_helped: list[dict] = []
+        reranker_hurt: list[dict] = []
+        for r in results:
+            agent_p = r["agent"].get("context_precision", {}).get("precision_at_k", 0.0)
+            no_rr_p = r["ablation_no_reranker"].get("context_precision", {}).get("precision_at_k", 0.0)
+            if agent_p > no_rr_p:
+                reranker_helped.append(r)
+            elif no_rr_p > agent_p:
+                reranker_hurt.append(r)
+        lines.append("## 5b. Reranker Ablation (Agent vs no-reranker)")
+        lines.append("")
+        lines.append(
+            "Compares context precision between the full agent (cross-encoder reranker on) "
+            "and the same agent run with `USE_RERANKER=False`. This isolates the contribution "
+            "of the reranker."
+        )
+        lines.append("")
+        lines.append(
+            f"- Reranker improved precision on **{len(reranker_helped)}/{len(results)}** queries"
+        )
+        lines.append(
+            f"- Reranker hurt precision on **{len(reranker_hurt)}/{len(results)}** queries"
+        )
+        lines.append(
+            f"- Tie on **{len(results) - len(reranker_helped) - len(reranker_hurt)}/{len(results)}**"
+        )
+        lines.append("")
+
     # ── 6. Summary statistics ──────────────────────────────────────────────
     total = len(results)
     lines.append("## 6. Summary")
@@ -1363,13 +1643,19 @@ def _generate_failure_analysis(results: list[dict], output_dir: Path) -> None:
 
 def _generate_plots(results: list[dict], summary: dict, output_dir: Path) -> None:
     """Generate comparison plots and save as PNG."""
+    has_no_rr = bool(results) and "ablation_no_reranker" in results[0]
     configs = ["agent", "baseline", "ablation_mega_prompt"]
     labels = ["Full Agent", "Plain LLM\n(Baseline)", "Mega-Prompt\n(Ablation)"]
+    colors = ["#2563eb", "#9ca3af", "#f59e0b"]
+    if has_no_rr:
+        configs.append("ablation_no_reranker")
+        labels.append("Agent\n(no reranker)")
+        colors.append("#10b981")
 
     # 1. Groundedness comparison
     fig, ax = plt.subplots(figsize=(8, 5))
     scores = [summary[c]["avg_groundedness"] for c in configs]
-    bars = ax.bar(labels, scores, color=["#2563eb", "#9ca3af", "#f59e0b"], edgecolor="black")
+    bars = ax.bar(labels, scores, color=colors, edgecolor="black")
     ax.set_ylabel("Average Groundedness Score (1-5)")
     ax.set_title("Groundedness: Full Agent vs Baseline vs Ablation")
     ax.set_ylim(0, 5.5)
@@ -1383,7 +1669,7 @@ def _generate_plots(results: list[dict], summary: dict, output_dir: Path) -> Non
     # 2. Answer relevancy comparison
     fig, ax = plt.subplots(figsize=(8, 5))
     relevancies = [summary[c]["avg_answer_relevancy"] for c in configs]
-    bars = ax.bar(labels, relevancies, color=["#2563eb", "#9ca3af", "#f59e0b"], edgecolor="black")
+    bars = ax.bar(labels, relevancies, color=colors, edgecolor="black")
     ax.set_ylabel("Average Answer Relevancy (1-5)")
     ax.set_title("Answer Relevancy: Full Agent vs Baseline vs Ablation")
     ax.set_ylim(0, 5.5)
@@ -1442,7 +1728,7 @@ def _generate_plots(results: list[dict], summary: dict, output_dir: Path) -> Non
     # 4. Latency comparison
     fig, ax = plt.subplots(figsize=(8, 5))
     latencies = [summary[c]["avg_latency_s"] for c in configs]
-    bars = ax.bar(labels, latencies, color=["#2563eb", "#9ca3af", "#f59e0b"], edgecolor="black")
+    bars = ax.bar(labels, latencies, color=colors, edgecolor="black")
     ax.set_ylabel("Average Latency (seconds)")
     ax.set_title("Latency: Full Agent vs Baseline vs Ablation")
     for bar, lat in zip(bars, latencies):
@@ -1457,10 +1743,13 @@ def _generate_plots(results: list[dict], summary: dict, output_dir: Path) -> Non
     x = range(len(results))
     query_labels = [f"Q{i+1}" for i in x]
 
-    for i, (config, label) in enumerate(zip(configs, ["Agent", "Baseline", "Ablation"])):
+    short_labels = ["Agent", "Baseline", "Ablation"] + (["No-Reranker"] if has_no_rr else [])
+    bar_w = 0.22 if has_no_rr else 0.25
+    n = len(configs)
+    for i, (config, label) in enumerate(zip(configs, short_labels)):
         scores = [r[config]["groundedness"]["score"] for r in results]
-        offset = (i - 1) * 0.25
-        ax.bar([xi + offset for xi in x], scores, width=0.25, label=label)
+        offset = (i - (n - 1) / 2) * bar_w
+        ax.bar([xi + offset for xi in x], scores, width=bar_w, label=label)
 
     ax.set_ylabel("Groundedness Score")
     ax.set_title("Per-Query Groundedness Breakdown")
@@ -1475,7 +1764,7 @@ def _generate_plots(results: list[dict], summary: dict, output_dir: Path) -> Non
     # 6. Source diversity comparison
     fig, ax = plt.subplots(figsize=(8, 5))
     diversities = [summary[c]["avg_source_diversity"] for c in configs]
-    bars = ax.bar(labels, diversities, color=["#2563eb", "#9ca3af", "#f59e0b"], edgecolor="black")
+    bars = ax.bar(labels, diversities, color=colors, edgecolor="black")
     ax.set_ylabel("Average Unique Sources Retrieved")
     ax.set_title("Source Diversity: Full Agent vs Baseline vs Ablation")
     for bar, div in zip(bars, diversities):
@@ -1504,8 +1793,8 @@ def _generate_plots(results: list[dict], summary: dict, output_dir: Path) -> Non
     # 8. Radar / multi-metric summary
     fig, ax = plt.subplots(figsize=(10, 5))
     metric_names = ["Groundedness", "Answer\nRelevancy", "Source\nDiversity\n(norm)"]
-    for config, label, color in zip(configs, ["Full Agent", "Baseline", "Ablation"],
-                                     ["#2563eb", "#9ca3af", "#f59e0b"]):
+    radar_labels = ["Full Agent", "Baseline", "Ablation"] + (["No-Reranker"] if has_no_rr else [])
+    for config, label, color in zip(configs, radar_labels, colors):
         vals = [
             summary[config]["avg_groundedness"],
             summary[config]["avg_answer_relevancy"],
@@ -1600,7 +1889,131 @@ def _generate_plots(results: list[dict], summary: dict, output_dir: Path) -> Non
         plt.savefig(output_dir / "groundedness_by_query_family.png", dpi=150)
         plt.close()
 
+    # 12. Precision: agent (with reranker) vs ablation_no_reranker
+    if has_no_rr:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        rr_labels = ["Agent\n(with reranker)", "Agent\n(no reranker)"]
+        rr_vals = [
+            summary["agent"].get("avg_context_precision", 0),
+            summary["ablation_no_reranker"].get("avg_context_precision", 0),
+        ]
+        bars = ax.bar(rr_labels, rr_vals, color=["#2563eb", "#10b981"], edgecolor="black")
+        ax.set_ylabel("Average Context Precision@K")
+        ax.set_title("Reranker Ablation: Precision@K with vs without cross-encoder")
+        ax.set_ylim(0, 1.1)
+        for bar, val in zip(bars, rr_vals):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.02,
+                f"{val:.2f}",
+                ha="center",
+                fontweight="bold",
+            )
+        plt.tight_layout()
+        plt.savefig(output_dir / "precision_with_vs_without_reranker.png", dpi=150)
+        plt.close()
+
+    # 13. Groundedness across all four configurations
+    if has_no_rr:
+        fig, ax = plt.subplots(figsize=(9, 5))
+        four_vals = [summary[c]["avg_groundedness"] for c in configs]
+        bars = ax.bar(labels, four_vals, color=colors, edgecolor="black")
+        ax.set_ylabel("Average Groundedness Score (1–5)")
+        ax.set_title("Groundedness: four-way comparison")
+        ax.set_ylim(0, 5.5)
+        for bar, val in zip(bars, four_vals):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.1,
+                f"{val:.1f}",
+                ha="center",
+                fontweight="bold",
+            )
+        plt.tight_layout()
+        plt.savefig(output_dir / "groundedness_four_way.png", dpi=150)
+        plt.close()
+
     log.info("Generated evaluation plots")
+
+
+# ── Human spot-check log (qualitative validation of LLM judges) ───────────────
+
+
+def _human_spot_check_log(results: list[dict], output_dir: Path, *, seed: int = 4205) -> None:
+    """Sample 5 cases (deterministic) and emit a markdown log for human ratings.
+
+    The harness writes the structure (case ID, question, agent answer, judge
+    scores, blank fields). The user fills the rating boxes by hand later. The
+    purpose is to support qualitative validation of the LLM-as-a-judge results
+    — once filled, agreement between human scores and judge scores can be
+    computed and reported.
+    """
+    import random
+
+    rng = random.Random(seed)
+    sample_n = min(5, len(results))
+    sample = rng.sample(list(results), sample_n)
+
+    lines: list[str] = [
+        "# Human Spot-Check Log",
+        "",
+        "_This log exists to support **qualitative validation of the LLM-as-a-judge**_",
+        "_pipeline. Five evaluation cases have been sampled deterministically_",
+        f"_(seed={seed}). Fill in **Human Score (1–5)** and **Comments** by hand,_",
+        "_then re-run the harness or compute disagreement (mean absolute error_",
+        "_between Human Score and `judge_groundedness.score`) yourself._",
+        "",
+        "Disagreement convention: |human − judge| ≥ 2 indicates a substantive",
+        "rating gap that should be discussed in the report.",
+        "",
+        "---",
+        "",
+    ]
+
+    for i, r in enumerate(sample, start=1):
+        cid = r.get("case_id", f"unknown_{i}")
+        fam = r.get("query_family", "?")
+        question = r.get("query", "")
+        agent_ans = r["agent"].get("answer", "") or ""
+        judge_g = r["agent"]["groundedness"].get("score", "")
+        judge_r = r["agent"]["answer_relevancy"].get("score", "")
+
+        # Truncate the answer so the log stays human-readable.
+        snippet = agent_ans.strip()
+        if len(snippet) > 1200:
+            snippet = snippet[:1200].rstrip() + "\n\n…[truncated for readability]"
+
+        lines.extend(
+            [
+                f"## Spot-check {i} — `{cid}` ({fam})",
+                "",
+                f"**Question:** {question}",
+                "",
+                "**Agent answer (excerpt):**",
+                "",
+                "```",
+                snippet,
+                "```",
+                "",
+                f"**Judge groundedness:** {judge_g}/5  ",
+                f"**Judge answer relevancy:** {judge_r}/5",
+                "",
+                "**Human groundedness (1–5):** ☐  ",
+                "**Human answer relevancy (1–5):** ☐",
+                "",
+                "**Comments (free text):**",
+                "",
+                "> ",
+                "",
+                "---",
+                "",
+            ]
+        )
+
+    out_path = output_dir / "human_spot_check.md"
+    with open(out_path, "w") as f:
+        f.write("\n".join(lines))
+    log.info("Human spot-check log saved to %s", out_path)
 
 
 # ── CLI Entry Point ────────────────────────────────────────────────────────────
@@ -1633,7 +2046,10 @@ def main() -> None:
     print("  EVALUATION SUMMARY")
     print("=" * 60)
     by_fam = summary.pop("by_query_family", {})
-    for config in ("agent", "baseline", "ablation_mega_prompt"):
+    config_order = ["agent", "baseline", "ablation_mega_prompt"]
+    if "ablation_no_reranker" in summary:
+        config_order.append("ablation_no_reranker")
+    for config in config_order:
         metrics = summary[config]
         print(f"\n  {config}:")
         print(f"    Avg Groundedness:       {metrics['avg_groundedness']}/5.0")
@@ -1642,9 +2058,10 @@ def main() -> None:
         print(f"    Avg IRAC Compliance:    {metrics['avg_irac_compliance']*100:.0f}%")
         if "avg_context_precision" in metrics:
             print(f"    Avg Context Precision:  {metrics['avg_context_precision']}")
-        if config in ("agent", "ablation_mega_prompt") and "avg_mrr" in metrics:
+        retrieval_configs = ("agent", "ablation_mega_prompt", "ablation_no_reranker")
+        if config in retrieval_configs and "avg_mrr" in metrics:
             print(f"    Avg MRR / Hit@K / NDCG: {metrics['avg_mrr']} / {metrics['avg_hit_at_k']} / {metrics['avg_ndcg_at_k']}")
-        if config in ("agent", "ablation_mega_prompt") and metrics.get("avg_recall_vs_pool") is not None:
+        if config in retrieval_configs and metrics.get("avg_recall_vs_pool") is not None:
             print(f"    Avg recall vs pool:     {metrics['avg_recall_vs_pool']}")
         print(f"    Avg Latency:            {metrics['avg_latency_s']}s")
         print(f"    Avg Source Diversity:    {metrics['avg_source_diversity']}")

@@ -19,7 +19,10 @@ from src.config import (
     CHROMA_DIR,
     MMR_FETCH_K,
     MMR_LAMBDA,
+    RERANKER_FETCH_K_SLIDES,
+    RERANKER_FETCH_K_TEXT,
     RETRIEVAL_STRATEGY,
+    USE_RERANKER,
 )
 from src.embeddings import ZeroEntropyEmbeddings
 
@@ -115,11 +118,31 @@ def _raw_to_retrieved(results: list) -> list[RetrievedDocument]:
     return docs
 
 
+def _maybe_rerank(
+    query: str,
+    docs: list[RetrievedDocument],
+    top_k: int,
+    use_reranker: bool,
+) -> list[RetrievedDocument]:
+    """Apply the cross-encoder reranker when enabled, else truncate to top_k."""
+    if not use_reranker:
+        return docs[:top_k]
+    try:
+        from src.agent.reranker import get_reranker
+
+        reranker = get_reranker()
+        return reranker.rerank(query, docs, top_k=top_k)
+    except Exception as e:  # pragma: no cover — graceful fallback
+        log.warning("Reranker unavailable (%s); falling back to MMR order", e)
+        return docs[:top_k]
+
+
 def retrieve_texts(
     query: str,
     week: str | None = None,
     k: int = 6,
     strategy: str | None = None,
+    use_reranker: bool | None = None,
 ) -> list[RetrievedDocument]:
     """Retrieve text chunks (readings, tutorials, supplementary) from the KB.
 
@@ -128,14 +151,27 @@ def retrieve_texts(
 
     Args:
         strategy: Override the global RETRIEVAL_STRATEGY for ablation.
+        use_reranker: Override the global USE_RERANKER (eval ablation hook).
+            When True, MMR fetches ``RERANKER_FETCH_K_TEXT`` candidates and a
+            cross-encoder reduces them to ``k``.
     """
     store = _get_vectorstore()
     doc_types = ["reading", "tutorial", "supplementary"]
     where_filter = _build_filter(week=week, doc_types=doc_types)
 
-    results = _search(store, query, k=k, where_filter=where_filter, strategy=strategy)
-    log.info("retrieve_texts [%s]: %d results (week=%s)", strategy or RETRIEVAL_STRATEGY, len(results), week)
-    return _raw_to_retrieved(results)
+    rerank_on = USE_RERANKER if use_reranker is None else bool(use_reranker)
+    fetch_k = RERANKER_FETCH_K_TEXT if rerank_on else k
+
+    results = _search(store, query, k=fetch_k, where_filter=where_filter, strategy=strategy)
+    log.info(
+        "retrieve_texts [%s, rerank=%s]: %d candidates (week=%s)",
+        strategy or RETRIEVAL_STRATEGY,
+        rerank_on,
+        len(results),
+        week,
+    )
+    docs = _raw_to_retrieved(results)
+    return _maybe_rerank(query, docs, top_k=k, use_reranker=rerank_on)
 
 
 def retrieve_slides(
@@ -143,6 +179,7 @@ def retrieve_slides(
     week: str | None = None,
     k: int = 4,
     strategy: str | None = None,
+    use_reranker: bool | None = None,
 ) -> list[RetrievedDocument]:
     """Retrieve lecture slide descriptions from the KB.
 
@@ -151,13 +188,24 @@ def retrieve_slides(
 
     Args:
         strategy: Override the global RETRIEVAL_STRATEGY for ablation.
+        use_reranker: Override the global USE_RERANKER (eval ablation hook).
     """
     store = _get_vectorstore()
     where_filter = _build_filter(week=week, doc_types=["lecture_slide"])
 
-    results = _search(store, query, k=k, where_filter=where_filter, strategy=strategy)
-    log.info("retrieve_slides [%s]: %d results (week=%s)", strategy or RETRIEVAL_STRATEGY, len(results), week)
-    return _raw_to_retrieved(results)
+    rerank_on = USE_RERANKER if use_reranker is None else bool(use_reranker)
+    fetch_k = RERANKER_FETCH_K_SLIDES if rerank_on else k
+
+    results = _search(store, query, k=fetch_k, where_filter=where_filter, strategy=strategy)
+    log.info(
+        "retrieve_slides [%s, rerank=%s]: %d candidates (week=%s)",
+        strategy or RETRIEVAL_STRATEGY,
+        rerank_on,
+        len(results),
+        week,
+    )
+    docs = _raw_to_retrieved(results)
+    return _maybe_rerank(query, docs, top_k=k, use_reranker=rerank_on)
 
 
 def retrieve_all(
@@ -165,8 +213,9 @@ def retrieve_all(
     week: str | None = None,
     k_text: int = 6,
     k_slides: int = 4,
+    use_reranker: bool | None = None,
 ) -> tuple[list[RetrievedDocument], list[RetrievedDocument]]:
     """Convenience wrapper that retrieves both text and slides in one call."""
-    texts = retrieve_texts(query, week=week, k=k_text)
-    slides = retrieve_slides(query, week=week, k=k_slides)
+    texts = retrieve_texts(query, week=week, k=k_text, use_reranker=use_reranker)
+    slides = retrieve_slides(query, week=week, k=k_slides, use_reranker=use_reranker)
     return texts, slides

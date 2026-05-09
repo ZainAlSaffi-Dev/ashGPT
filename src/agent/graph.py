@@ -27,9 +27,11 @@ from src.agent.nodes import (
     retrieval_node,
     router_node,
     synthesis_node,
+    verification_node,
 )
 from src.agent.chat_memory import prepare_chat_history_for_run
 from src.agent.state import AgentState
+from src.config import USE_VERIFICATION
 
 load_dotenv()
 
@@ -70,6 +72,8 @@ def build_graph() -> StateGraph:
     graph.add_node("ratio_extractor", ratio_extractor_node)
     graph.add_node("chronology", chronology_node)
     graph.add_node("synthesis", synthesis_node)
+    if USE_VERIFICATION:
+        graph.add_node("verification", verification_node)
 
     # 3. Define the fixed edges (always follow this path)
     graph.set_entry_point("router")
@@ -103,9 +107,17 @@ def build_graph() -> StateGraph:
     )
 
     graph.add_edge("chronology", "synthesis")
-    graph.add_edge("synthesis", END)
 
-    # 6. Compile and return
+    # 6. Synthesis → verification (if enabled) → END.
+    #    Verification fact-checks cited cases against retrieved sources and
+    #    asks the synthesis model to remove or hedge unsupported claims.
+    if USE_VERIFICATION:
+        graph.add_edge("synthesis", "verification")
+        graph.add_edge("verification", END)
+    else:
+        graph.add_edge("synthesis", END)
+
+    # 7. Compile and return
     compiled = graph.compile()
     log.info("LangGraph workflow compiled successfully")
     return compiled

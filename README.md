@@ -208,6 +208,12 @@ ashGPT/
 └── .env.example
 ```
 
+## Generalisation
+
+The hypothesis is stated in the language of common law analysis, but the underlying claim — *that separating structurally distinct outputs into specialised nodes improves grounding versus a single mega-prompt* — is not specific to property law. The same cognitive separation should apply to **medical case reasoning** (where a differential-diagnosis ranking, a clinical timeline, and a guideline-grounded recommendation are structurally different outputs that compete for attention inside one prompt), **financial regulatory analysis** (where a control-mapping table, a chronology of disclosure events, and an applied-rule analysis under a regulation each demand a different output shape), and **scientific paper synthesis** (where a methods comparison, an evidence chronology, and a hypothesis-driven discussion all benefit from being generated under different system prompts and then composed).
+
+The pattern is simpler than the legal frame suggests: any domain in which structured outputs — chronology, taxonomy, rule application, mapping tables, sequence diagrams — compete for attention inside a single prompt is a candidate for cognitive separation. The IRAC + Mermaid split implemented here is one specific instance of a more general design: route by the *kind of structure* the user wants, generate each structure in a node optimised for it, and then synthesise. The retrieval modalities, the structural validators, and the per-node model assignments would change between domains; the multi-node + verification + ablation evaluation pattern would not.
+
 ## Tech Stack
 
 | Layer | Technology |

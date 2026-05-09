@@ -22,6 +22,7 @@ from src.agent.chat_memory import (
 )
 from src.agent.state import AgentState
 from src.agent.tools import retrieve_all
+from src.agent.verification import find_unsupported_cases
 from src.config import (
     ABLATION_MODEL,
     CHRONOLOGY_MODEL,
@@ -162,15 +163,27 @@ def router_node(state: AgentState) -> dict:
 def retrieval_node(state: AgentState) -> dict:
     """Query ChromaDB for relevant text chunks and slide descriptions.
 
-    Reads:  query, week_filter, chat_history
+    Reads:  query, week_filter, chat_history, use_reranker (optional override)
     Writes: retrieved_texts, retrieved_slides, node_trace
     """
     history = get_chat_history(state)
     search_q = build_retrieval_query(state["query"], history)
     week = state.get("week_filter")
-    log.info("RetrievalNode: searching KB (week=%s, follow_up=%s)", week, bool(history))
+    use_reranker_override = state.get("use_reranker")
+    log.info(
+        "RetrievalNode: searching KB (week=%s, follow_up=%s, rerank_override=%s)",
+        week,
+        bool(history),
+        use_reranker_override,
+    )
 
-    texts, slides = retrieve_all(search_q, week=week, k_text=8, k_slides=4)
+    texts, slides = retrieve_all(
+        search_q,
+        week=week,
+        k_text=8,
+        k_slides=4,
+        use_reranker=use_reranker_override,
+    )
 
     log.info(
         "RetrievalNode: retrieved %d text chunks, %d slides",
@@ -456,6 +469,105 @@ def synthesis_node(state: AgentState) -> dict:
     return {
         "final_answer": final_answer,
         "node_trace": _append_trace(state, "synthesis"),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NODE 6: VERIFICATION (post-synthesis fact check)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+VERIFICATION_REWRITE_SYSTEM = (
+    "You are a careful Property Law editor. You will be given:\n"
+    "1. The student's question.\n"
+    "2. The retrieved source material.\n"
+    "3. A draft answer.\n"
+    "4. A list of CASE CITATIONS in the draft that DO NOT appear in the sources.\n\n"
+    "Your task: rewrite the draft answer so that EACH unsupported citation is "
+    "either (a) removed entirely, or (b) hedged with a phrase that signals it is "
+    "not in the provided materials (e.g. \"is not covered in the indexed "
+    "sources\"). Preserve every supported claim, the structure of the answer, "
+    "every Markdown heading, and any ```mermaid code block VERBATIM. Do not "
+    "introduce new citations. Do not mention this rewrite process to the "
+    "student. Return ONLY the rewritten answer."
+)
+
+
+def _collect_sources_text(state: AgentState) -> str:
+    """Concatenate raw content from retrieved texts and slides for citation lookup."""
+    parts: list[str] = []
+    for doc in state.get("retrieved_texts", []) or []:
+        parts.append(doc.get("content", ""))
+        parts.append(doc.get("source", ""))
+    for doc in state.get("retrieved_slides", []) or []:
+        parts.append(doc.get("content", ""))
+        parts.append(doc.get("source", ""))
+    return "\n".join(p for p in parts if p)
+
+
+def verification_node(state: AgentState) -> dict:
+    """Fact-check cited cases in the final answer against retrieved sources.
+
+    For each italicised or plain ``X v Y`` citation in ``final_answer``, check
+    whether the case name appears anywhere in the retrieved chunk content.
+    If unsupported citations exist, ask the synthesis model to rewrite the
+    answer with those claims removed or hedged. Supported claims are
+    preserved verbatim by prompt design.
+
+    Reads:  final_answer, retrieved_texts, retrieved_slides, query
+    Writes: final_answer (possibly rewritten), verification_report, node_trace
+    """
+    answer = state.get("final_answer", "") or ""
+    sources_text = _collect_sources_text(state)
+    unsupported = find_unsupported_cases(answer, sources_text)
+
+    report = {
+        "unsupported_claims": unsupported,
+        "rewrites_applied": False,
+    }
+
+    if not unsupported:
+        log.info("VerificationNode: all citations supported — no rewrite needed")
+        return {
+            "verification_report": report,
+            "node_trace": _append_trace(state, "verification"),
+        }
+
+    log.info(
+        "VerificationNode: %d unsupported citation(s): %s",
+        len(unsupported),
+        unsupported,
+    )
+
+    rewrite_prompt = (
+        f"STUDENT QUESTION: {state.get('query', '')}\n\n"
+        f"RETRIEVED SOURCE MATERIAL:\n{_format_context(state)}\n\n"
+        f"DRAFT ANSWER:\n{answer}\n\n"
+        f"UNSUPPORTED CITATIONS (must be removed or hedged):\n"
+        + "\n".join(f"- {c}" for c in unsupported)
+        + "\n\nRewrite the answer per the instructions. Return ONLY the rewritten answer."
+    )
+
+    try:
+        rewritten = llm_call(
+            rewrite_prompt,
+            model=SYNTHESIS_MODEL,
+            system_instruction=VERIFICATION_REWRITE_SYSTEM,
+        )
+        rewritten = (rewritten or "").strip()
+        if rewritten:
+            report["rewrites_applied"] = True
+            return {
+                "final_answer": rewritten,
+                "verification_report": report,
+                "node_trace": _append_trace(state, "verification"),
+            }
+    except Exception as e:  # graceful: leave answer unchanged on rewrite failure
+        log.warning("VerificationNode: rewrite failed (%s); keeping draft", e)
+
+    return {
+        "verification_report": report,
+        "node_trace": _append_trace(state, "verification"),
     }
 
 

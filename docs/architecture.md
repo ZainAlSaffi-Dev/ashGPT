@@ -204,3 +204,31 @@ graph TD
 | `chat_history` separate from `query` | Keeps retrieval embeddings focused on the current question while still giving LLM nodes conversational context |
 | Deterministic document IDs | Safe re-indexing without duplicates |
 | `node_trace` in state | Tracks which nodes fired per query for ablation comparison and latency breakdown |
+
+## Beyond Property Law
+
+The hypothesis is framed around *ratio decidendi* and chronological flowcharts, but the architectural claim it tests is domain-agnostic: **separating structurally distinct outputs into specialised nodes improves grounding versus a single mega-prompt**. This section sketches what a port to another domain would look like, using **medical case reasoning** as the worked example.
+
+### What stays the same
+
+- The five-stage spine: **router → retrieval → specialised reasoning node(s) → synthesis → verification**.
+- The PRIMARY-vs-DERIVED distinction in the synthesis prompt, which prevents node-generated artefacts from being treated as ground-truth facts.
+- The ablation pattern: a **mega-prompt** baseline (one consolidated LLM call) and a **no-reranker** ablation, run alongside the full agent on the same cases, judged by a cross-provider two-stage LLM judge with a small human spot-check log for qualitative validation.
+- The verification node: extract structured claim tokens from the final answer, look them up in the retrieved sources, and rewrite to remove or hedge unsupported claims.
+- The metrics shape: groundedness, answer relevancy, context precision\@K, MRR / NDCG, latency, source diversity, structural validity of the structured artefacts.
+
+### What changes when porting to medical case reasoning
+
+| Layer | Property Law (current) | Medical case reasoning (port) |
+|-------|------------------------|--------------------------------|
+| **Router classes** | `ratio` / `chronology` / `summary` / `general` | `differential` / `timeline` / `guideline_application` / `general` |
+| **Specialised nodes** | Ratio Extractor (IRAC), Chronology Generator (Mermaid) | Differential Ranker (ICD-10 weighted list), Clinical Timeline (Mermaid or Gantt), Guideline Mapper (e.g. NICE / RACGP rule application) |
+| **Retrieval modalities** | PDF readings + VLM-described lecture slides | EHR text (notes, labs, discharge summaries) + radiology images described by a VLM (chest x-ray, MRI) + structured codes (ICD-10, SNOMED) |
+| **Structural validators** | Mermaid validity, IRAC component coverage | Differential is a ranked list with weights summing to 1; timeline events have ISO-8601 dates; guideline citation maps to a known rulebook ID |
+| **Verification node** | Extract case citations (`X v Y`); check against retrieved chunk text | Extract clinical claims (drug name, dose, recommendation tier) and verified guideline IDs; check each against the retrieved guideline chunks |
+| **Per-node models** | Lightweight router/chronology, mid-tier ratio, strong synthesis | Same shape, but with a clinically-tuned synthesis model (or a model with the appropriate compliance posture) |
+| **Eval families** | factual / cross-modal / analytical / conversational | factual lookup / cross-modal (image + note) / multi-source synthesis / multi-turn handover |
+
+### Why the pattern carries over
+
+The argument generalises because the failure mode it addresses — a single prompt being asked to produce multiple structurally distinct artefacts and silently trading one for another — appears in every domain where the answer is **a composition of structured outputs grounded in a heterogeneous corpus**. Property Law happens to make that failure visible (a missing ratio is glaring; a Mermaid diagram converted to bullet points is glaring). Medicine makes it costly (a missing differential entry, a wrong dose). Financial regulation makes it auditable (a missing control mapping is a finding). The cognitive separation is the same lever in each case; only the validators and the retrieval surfaces change.

@@ -38,6 +38,18 @@ RETRIEVAL_STRATEGY = "mmr"
 MMR_LAMBDA = 0.5
 MMR_FETCH_K = 20
 
+# ── Cross-encoder reranker (post-MMR) ─────────────────────────────────────────
+# When enabled, MMR over-fetches RERANKER_FETCH_K_* candidates and the cross
+# encoder reduces to the original retrieval k. Diversity (MMR) is preserved as
+# the candidate pool; precision is lifted by re-scoring against the query.
+USE_RERANKER = True
+RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+RERANKER_FETCH_K_TEXT = 16     # MMR returns 16 text chunks → rerank to 8
+RERANKER_FETCH_K_SLIDES = 8    # MMR returns 8 slide chunks  → rerank to 4
+
+# ── Verification node (fact-check cited cases against retrieved sources) ──────
+USE_VERIFICATION = True
+
 # ── Multi-turn chat (Streamlit session → AgentState.chat_history) ─────────────
 CHAT_HISTORY_MAX_MESSAGES = 24
 CHAT_HISTORY_MAX_CHARS_PER_MESSAGE = 3500

@@ -8,10 +8,10 @@ Every eval case is assigned **exactly one** of four families. Use this table for
 
 | Family | Cases | Case IDs |
 |--------|-------|----------|
-| **factual_retrieval** | 4 | fact_moran_test, fact_fee_simple, fact_bailment_ratio, fact_perry_possessory |
-| **cross_modal_retrieval** | 3 | xmodal_chattels_slides, xmodal_moukataff_slide, xmodal_ap_slides |
-| **analytical_synthesis** | 5 | anal_ap_elements, anal_lease_licence, anal_chronology_ap, anal_torrens_framework, anal_taxonomy |
-| **conversational_followup** | 3 | conv_ap_followup, conv_torrens_followup, conv_chattels_found |
+| **factual_retrieval** | 6 | fact_moran_test, fact_fee_simple, fact_bailment_ratio, fact_perry_possessory, fact_fee_tail_vs_simple, fact_pla_chattels |
+| **cross_modal_retrieval** | 5 | xmodal_chattels_slides, xmodal_moukataff_slide, xmodal_ap_slides, xmodal_torrens_indefeasibility, xmodal_bailment_categories |
+| **analytical_synthesis** | 7 | anal_ap_elements, anal_lease_licence, anal_chronology_ap, anal_torrens_framework, anal_taxonomy, anal_legal_vs_equitable_interests, anal_torrens_title_passing |
+| **conversational_followup** | 4 | conv_ap_followup, conv_torrens_followup, conv_chattels_found, conv_lease_three_turn |
 
 - **factual_retrieval:** Direct retrieval of stored knowledge: doctrine, tests, and definitions that should appear verbatim or paraphrased from a small number of chunks.
 - **cross_modal_retrieval:** Requires the lecture-slide channel: questions are phrased to target VLM-indexed slide descriptions alongside PDF readings (multimodal KB).
@@ -20,7 +20,7 @@ Every eval case is assigned **exactly one** of four families. Use this table for
 
 ### Family: `factual_retrieval`
 
-- **fact_moran_test** (single turn): groundedness **5/5**, relevancy **5/5**
+- **fact_moran_test** (single turn): groundedness **4/5**, relevancy **5/5**
   - *Rationale:* Named case test — should retrieve specific ratio/test from readings.
 - **fact_fee_simple** (single turn): groundedness **5/5**, relevancy **5/5**
   - *Rationale:* Core estate definition — single-concept factual answer.
@@ -28,6 +28,10 @@ Every eval case is assigned **exactly one** of four families. Use this table for
   - *Rationale:* Ratio-style question tied to course materials on bailment.
 - **fact_perry_possessory** (single turn): groundedness **5/5**, relevancy **5/5**
   - *Rationale:* Named case holding from indexed readings.
+- **fact_fee_tail_vs_simple** (single turn): groundedness **5/5**, relevancy **5/5**
+  - *Rationale:* Comparative doctrine question — should retrieve estate-type readings.
+- **fact_pla_chattels** (single turn): groundedness **4/5**, relevancy **5/5**
+  - *Rationale:* Statute lookup — Property Law Act 1974 (Qld) on chattels.
 
 ### Family: `cross_modal_retrieval`
 
@@ -39,6 +43,12 @@ Every eval case is assigned **exactly one** of four families. Use this table for
   - *Retrieval:* text chunks=8, slide chunks=4, both_modalities=True
 - **xmodal_ap_slides** (single turn): groundedness **5/5**, relevancy **5/5**
   - *Rationale:* Asks for emphasis from slide-indexed adverse possession teaching.
+  - *Retrieval:* text chunks=8, slide chunks=4, both_modalities=True
+- **xmodal_torrens_indefeasibility** (single turn): groundedness **5/5**, relevancy **5/5**
+  - *Rationale:* Targets lecture slides on Torrens indefeasibility — VLM-described content.
+  - *Retrieval:* text chunks=8, slide chunks=4, both_modalities=True
+- **xmodal_bailment_categories** (single turn): groundedness **5/5**, relevancy **5/5**
+  - *Rationale:* Slide-anchored taxonomy: bailment categories from lecture deck.
   - *Retrieval:* text chunks=8, slide chunks=4, both_modalities=True
 
 ### Family: `analytical_synthesis`
@@ -53,6 +63,10 @@ Every eval case is assigned **exactly one** of four families. Use this table for
   - *Rationale:* Framework summary spanning readings/slides on Torrens.
 - **anal_taxonomy** (single turn): groundedness **5/5**, relevancy **5/5**
   - *Rationale:* Taxonomy spans multiple categories (real vs personal property).
+- **anal_legal_vs_equitable_interests** (single turn): groundedness **5/5**, relevancy **5/5**
+  - *Rationale:* Comparison across multiple chunks of equitable vs legal interests.
+- **anal_torrens_title_passing** (single turn): groundedness **4/5**, relevancy **5/5**
+  - *Rationale:* Sequenced reasoning: passage of legal title in a Torrens transfer.
 
 ### Family: `conversational_followup`
 
@@ -60,8 +74,10 @@ Every eval case is assigned **exactly one** of four families. Use this table for
   - *Rationale:* Second turn references 'that ratio' — needs session memory.
 - **conv_torrens_followup** (2 turn(s)): groundedness **5/5**, relevancy **5/5**
   - *Rationale:* Contrast question after Torrens explanation — coreference to prior answer.
-- **conv_chattels_found** (2 turn(s)): groundedness **4/5**, relevancy **5/5**
+- **conv_chattels_found** (2 turn(s)): groundedness **5/5**, relevancy **5/5**
   - *Rationale:* Hypothetical extension after test — requires prior topic + retrieval.
+- **conv_lease_three_turn** (3 turn(s)): groundedness **5/5**, relevancy **5/5**
+  - *Rationale:* Three-turn case where the third turn references the second.
 
 ## 1. Low Groundedness (Agent < 4/5)
 
@@ -71,9 +87,7 @@ No queries scored below 4. All agent answers were well-grounded.
 
 Cases where the single mega-prompt outperformed the full agent on groundedness, suggesting the multi-node pipeline introduced unverifiable inferences on those queries.
 
-### Q: "Does anything in our indexed materials suggest the answer changes if the chattel was found on the ground rather than handed over? Explain briefly."
-- **Agent:** 4/5 | **Ablation:** 5/5
-- **Agent judge reasoning:** The draft is a bit too generous. Most of the answer is well grounded: it correctly states the general possession test as physical control plus intention to exclusively control, and it accurately explains the special finder/occupier distinction for items found on land versus in/attached to land, including the occupier’s need to manifest an intention to control and the relevance of Bridges v Hawkesworth. However, the final answer goes beyond the indexed materials when it says, 'If it was merely handed over to someone, those land-based finder rules are not the focus.' The sources provided discuss objects found on/in land and, in Parker, the finder handing the item to an airline employee after finding it; they do not support a separate contrast between 'found on the ground' and 'handed over' as though handing over changes the legal framework. That is an unsupported inference, though not a major fabrication. So the answer is strong but not flawless.
+The agent matched or outperformed the ablation on all queries.
 
 ## 3. Low Context Precision (Retrieval < 70%)
 
@@ -88,40 +102,56 @@ Queries where fewer than 70% of retrieved chunks were judged relevant, indicatin
 - **Verdicts:** [True, True, True, True, True, True, True, True, False, False, False, False]
 
 ### Q: "What is the ratio decidendi regarding bailment at will?"
-- **Precision@K:** 50% (6/12 relevant)
-- **Verdicts:** [True, True, True, True, True, False, False, False, True, False, False, False]
+- **Precision@K:** 67% (8/12 relevant)
+- **Verdicts:** [True, False, True, True, True, False, True, True, True, True, False, False]
 
 ### Q: "What is the ratio in Perry v Clissold regarding possessory title?"
-- **Precision@K:** 58% (7/12 relevant)
-- **Verdicts:** [True, True, True, True, True, False, True, False, True, False, False, False]
+- **Precision@K:** 67% (8/12 relevant)
+- **Verdicts:** [True, True, True, True, False, True, True, True, True, False, False, False]
 
 ### Q: "According to the indexed lecture slide materials in the knowledge base, what two elements are required to establish possession of chattels?"
-- **Precision@K:** 50% (6/12 relevant)
-- **Verdicts:** [False, True, True, True, False, True, False, False, False, True, True, False]
+- **Precision@K:** 58% (7/12 relevant)
+- **Verdicts:** [True, True, True, False, False, True, True, False, False, False, True, True]
 
 ### Q: "What does the indexed lecture content describe about Moukataff v BOAC and baggage or chattel possession?"
-- **Precision@K:** 42% (5/12 relevant)
-- **Verdicts:** [True, True, True, True, False, False, False, False, True, False, False, False]
-
-### Q: "Based on the VLM-described lecture slides on adverse possession in the knowledge base, what sequence or steps do those materials emphasise?"
 - **Precision@K:** 67% (8/12 relevant)
-- **Verdicts:** [True, True, True, True, True, True, True, True, False, False, False, False]
+- **Verdicts:** [True, True, True, True, True, True, False, True, True, False, False, False]
 
 ### Q: "What legal principle governs the distinction between a lease and a licence, and how does each concept apply in outline?"
 - **Precision@K:** 42% (5/12 relevant)
-- **Verdicts:** [True, True, False, True, False, True, True, False, False, False, False, False]
-
-### Q: "Show the chronological sequence of how adverse possession is established under the materials we indexed."
-- **Precision@K:** 58% (7/12 relevant)
-- **Verdicts:** [True, True, True, True, True, True, True, False, False, False, False, False]
+- **Verdicts:** [True, False, False, True, False, True, True, True, False, False, False, False]
 
 ### Q: "Summarise the legal framework for land registration under the Torrens system as presented in the indexed course materials."
 - **Precision@K:** 67% (8/12 relevant)
 - **Verdicts:** [True, True, True, True, True, True, True, True, False, False, False, False]
 
 ### Q: "In one paragraph, how does that differ from a deeds registry? Stay within our indexed course sources only."
+- **Precision@K:** 67% (8/12 relevant)
+- **Verdicts:** [True, True, True, True, True, False, True, True, False, False, True, False]
+
+### Q: "What is the difference between a fee tail and a fee simple in our materials?"
 - **Precision@K:** 58% (7/12 relevant)
-- **Verdicts:** [True, True, True, True, True, True, False, True, False, False, False, False]
+- **Verdicts:** [True, True, True, True, True, False, True, True, False, False, False, False]
+
+### Q: "What does the Property Law Act 1974 (Qld) say about chattels in the readings?"
+- **Precision@K:** 33% (4/12 relevant)
+- **Verdicts:** [True, False, True, False, False, False, False, False, True, False, False, True]
+
+### Q: "Looking at the indexed lecture slides on the Torrens system, how do those materials present the doctrine of indefeasibility of title?"
+- **Precision@K:** 67% (8/12 relevant)
+- **Verdicts:** [True, True, True, True, True, True, True, True, False, False, False, False]
+
+### Q: "From the lecture slides indexed in the knowledge base, what categories of bailment do those materials describe?"
+- **Precision@K:** 58% (7/12 relevant)
+- **Verdicts:** [True, True, True, False, True, True, False, False, True, False, True, False]
+
+### Q: "Sequence the steps by which legal title passes in a Torrens-system land transfer, citing the indexed course materials at each step."
+- **Precision@K:** 50% (6/12 relevant)
+- **Verdicts:** [True, False, True, True, True, True, False, True, False, False, False, False]
+
+### Q: "Which of those points you just made would change if the licence were irrevocable? Stay within our indexed sources only."
+- **Precision@K:** 50% (6/12 relevant)
+- **Verdicts:** [False, False, True, False, True, True, True, True, False, False, False, True]
 
 ## 4. Low Answer Relevancy (Agent < 4/5)
 
@@ -131,13 +161,21 @@ All agent answers scored 4+ on relevancy.
 
 The agent matched or outperformed the baseline on all queries.
 
+## 5b. Reranker Ablation (Agent vs no-reranker)
+
+Compares context precision between the full agent (cross-encoder reranker on) and the same agent run with `USE_RERANKER=False`. This isolates the contribution of the reranker.
+
+- Reranker improved precision on **11/22** queries
+- Reranker hurt precision on **3/22** queries
+- Tie on **8/22**
+
 ## 6. Summary
 
 | Category | Count | Percentage |
 |----------|-------|------------|
-| Total queries | 15 | 100% |
+| Total queries | 22 | 100% |
 | Low groundedness (<4) | 0 | 0% |
-| Ablation outperformed agent | 1 | 7% |
-| Low context precision (<70%) | 11 | 73% |
+| Ablation outperformed agent | 0 | 0% |
+| Low context precision (<70%) | 15 | 68% |
 | Low answer relevancy (<4) | 0 | 0% |
 | Baseline outperformed agent | 0 | 0% |
