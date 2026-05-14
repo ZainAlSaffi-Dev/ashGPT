@@ -1,9 +1,8 @@
 """Unified multi-provider LLM dispatch.
 
-Routes calls to Google Gemini, OpenAI, or Anthropic based on the model name prefix:
+Routes calls to Google Gemini or OpenAI based on the model name prefix:
     "gemini-*" → Google GenAI
     "gpt-*"    → OpenAI
-    "claude-*" → Anthropic
 
 All providers expose the same interface via llm_call().
 Token usage is tracked globally and can be retrieved with get_token_usage().
@@ -12,7 +11,6 @@ Token usage is tracked globally and can be retrieved with get_token_usage().
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
@@ -78,7 +76,6 @@ def reset_token_usage() -> None:
 
 _gemini_client = None
 _openai_client = None
-_anthropic_client = None
 
 
 def _get_gemini():
@@ -97,15 +94,6 @@ def _get_openai():
         _openai_client = OpenAI()
         log.info("OpenAI client initialised")
     return _openai_client
-
-
-def _get_anthropic():
-    global _anthropic_client
-    if _anthropic_client is None:
-        from anthropic import Anthropic
-        _anthropic_client = Anthropic()
-        log.info("Anthropic client initialised")
-    return _anthropic_client
 
 
 # ── Provider dispatch ─────────────────────────────────────────────────────────
@@ -179,35 +167,6 @@ def _call_openai(
     return response.output_text
 
 
-def _call_anthropic(
-    prompt: str,
-    model: str,
-    system_instruction: str | None,
-    temperature: float,
-) -> str:
-    client = _get_anthropic()
-    kwargs = {
-        "model": model,
-        "max_tokens": 4096,
-        "temperature": temperature,
-        "messages": [{"role": "user", "content": prompt}],
-    }
-    if system_instruction:
-        kwargs["system"] = system_instruction
-
-    response = client.messages.create(**kwargs)
-
-    usage = getattr(response, "usage", None)
-    if usage:
-        _token_usage.record(
-            model,
-            getattr(usage, "input_tokens", 0),
-            getattr(usage, "output_tokens", 0),
-        )
-
-    return response.content[0].text
-
-
 # ── Public interface ──────────────────────────────────────────────────────────
 
 
@@ -235,10 +194,8 @@ def llm_call(
     elif model.startswith("gpt"):
         effort = reasoning_effort or _REASONING_EFFORT.get(model)
         return _call_openai(prompt, model, system_instruction, temperature, effort)
-    elif model.startswith("claude"):
-        return _call_anthropic(prompt, model, system_instruction, temperature)
     else:
         raise ValueError(
             f"Unknown model prefix: {model!r}. "
-            "Model name must start with 'gemini-', 'gpt-', or 'claude-'."
+            "Model name must start with 'gemini-' or 'gpt-'."
         )

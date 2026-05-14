@@ -26,7 +26,7 @@ graph TD
 
     subgraph pipeline ["LangGraph State Machine"]
         Router["Router Node\nClassify intent + extract week filter"]
-        Router --> Retrieval["Retrieval Node\nMMR search: 8 text chunks + 4 slides"]
+        Router --> Retrieval["Retrieval Node\nMMR (fetch_k=20)\n+ cross-encoder rerank\n→ 8 text chunks + 4 slides"]
 
         Retrieval --> Decision{"intent?"}
 
@@ -38,19 +38,23 @@ graph TD
         RatioExtractor -->|"if summary"| Chronology
         RatioExtractor -->|"if ratio"| Synthesis["Synthesis Node\nGrounded final answer\n(Mermaid block preserved verbatim)"]
         Chronology --> Synthesis
+
+        Synthesis --> Verification["Verification Node\nExtract X v Y citations →\ncheck against retrieved chunks →\nrewrite to remove/hedge\nunsupported claims"]
     end
 
-    Synthesis --> FinalAnswer["Final Answer\n+ IRAC + Mermaid diagram"]
+    Verification --> FinalAnswer["Final Answer\n+ IRAC + Mermaid diagram\n+ verification_report"]
 ```
 
 ### Intent routing rules
 
 | Intent | Trigger | Node path |
 |--------|---------|-----------|
-| `ratio` | User asks for ratio decidendi, binding rule, or IRAC analysis | Retrieval → Ratio Extractor → Synthesis |
-| `chronology` | User asks *only* for a diagram, timeline, or flowchart (no broader explanation) | Retrieval → Chronology → Synthesis |
-| `summary` | User asks for an explanation/overview **or** combines a timeline request with any explanatory goal (e.g. "sequence of events and provide a summary") | Retrieval → Ratio Extractor → Chronology → Synthesis |
-| `general` | Greetings, meta-questions, off-topic | Retrieval → Synthesis |
+| `ratio` | User asks for ratio decidendi, binding rule, or IRAC analysis | Retrieval → Ratio Extractor → Synthesis → Verification |
+| `chronology` | User asks *only* for a diagram, timeline, or flowchart (no broader explanation) | Retrieval → Chronology → Synthesis → Verification |
+| `summary` | User asks for an explanation/overview **or** combines a timeline request with any explanatory goal (e.g. "sequence of events and provide a summary") | Retrieval → Ratio Extractor → Chronology → Synthesis → Verification |
+| `general` | Greetings, meta-questions, off-topic | Retrieval → Synthesis → Verification |
+
+Verification runs unconditionally after synthesis (gated globally by `USE_VERIFICATION` in `src/config.py`). It is a cheap pass when no unsupported citations are found (regex only, no LLM call); it only invokes the synthesis model again on cases where it has to rewrite.
 
 ## State Schema
 
@@ -87,12 +91,17 @@ graph LR
         Answer["final_answer: str"]
     end
 
+    subgraph verifState ["Verification Output"]
+        VerReport["verification_report: dict\n  unsupported_claims: list[str]\n  rewrites_applied: bool"]
+    end
+
     subgraph diagState ["Diagnostics"]
         Trace["node_trace: list[str]"]
+        UseRerank["use_reranker: bool\n(eval override; falls back to USE_RERANKER)"]
     end
 
     inputState --> routerState --> retrievalState --> ratioState --> chronoState --> synthState
-    synthState --> diagState
+    synthState --> verifState --> diagState
 ```
 
 `ChatMessage` is `{role: "user" | "assistant", content: str}`. History is trimmed to a maximum of 24 messages and 3500 chars per message before being packed into the state.
@@ -101,17 +110,32 @@ graph LR
 
 ```mermaid
 graph TD
-    QueryEmbed["Query embedded via\nzembed-1 (query mode)"] --> Candidates["Fetch top-20 candidates\nfrom ChromaDB"]
+    QueryEmbed["Query embedded via\nzembed-1 (query mode)"] --> Candidates["Fetch top-20 candidates\nfrom ChromaDB\n(metadata-filtered)"]
     Candidates --> MMR["MMR Selection\nlambda=0.5"]
-    MMR --> TextChunks["8 text chunks\nreadings, tutorials, supplementary"]
-    MMR --> SlideChunks["4 slide descriptions\nwith image_path metadata"]
-    TextChunks --> FilterMeta{"Week filter?"}
-    SlideChunks --> FilterMeta
-    FilterMeta -->|"yes"| Filtered["Results restricted\nto specified week"]
-    FilterMeta -->|"no"| AllWeeks["Results from\nall weeks"]
+    MMR --> TextPool["MMR top 16 text chunks\n(RERANKER_FETCH_K_TEXT)"]
+    MMR --> SlidePool["MMR top 8 slide chunks\n(RERANKER_FETCH_K_SLIDES)"]
+    TextPool --> RerankerT["Cross-encoder rerank\nms-marco-MiniLM-L-6-v2"]
+    SlidePool --> RerankerS["Cross-encoder rerank\nms-marco-MiniLM-L-6-v2"]
+    RerankerT --> TextChunks["Top 8 text chunks"]
+    RerankerS --> SlideChunks["Top 4 slide chunks\nwith image_path metadata"]
 ```
 
+The two-stage design preserves MMR's diversity property — the reranker scores from a *diverse* pool rather than a redundant similarity pool — while the cross-encoder pass restores the precision that MMR sacrifices for diversity. The reranker is gated by `USE_RERANKER` in `src/config.py` and can be flipped per-run via the `use_reranker` state field; the no-reranker eval ablation uses this hook to attribute the precision contribution.
+
 On follow-up turns, `build_retrieval_query` prepends an excerpt of the last assistant turn (up to 1200 chars) to the embedding query so the vector search can resolve pronouns and contextual references without losing focus on the new question.
+
+## Verification Strategy
+
+```mermaid
+graph TD
+    Draft["Synthesis draft answer"] --> Extract["extract_case_citations\nregex over X v Y\n+ leading-stopword trim"]
+    Extract --> Check["case_appears_in_sources\nsubstring + party-token check\nover all retrieved chunk content"]
+    Check -->|"all supported"| Pass["verification_report:\n  unsupported_claims=[]\n  rewrites_applied=False\n→ final answer unchanged"]
+    Check -->|"≥1 unsupported"| Rewrite["llm_call (SYNTHESIS_MODEL)\nrewrite system prompt:\nremove/hedge unsupported\npreserve every supported claim\nand ```mermaid block verbatim"]
+    Rewrite --> Patched["final_answer ← rewritten\nverification_report:\n  unsupported_claims=[...]\n  rewrites_applied=True"]
+```
+
+The check is cheap when nothing needs fixing — the regex and substring lookups run in microseconds. A second LLM call only fires when at least one citation is unsupported. Failure of the rewrite call is caught and the draft answer is preserved, with `rewrites_applied=False` recorded.
 
 ## Multi-Turn Chat Memory
 
@@ -141,6 +165,8 @@ This ensures diagrams render correctly both on first delivery and when the chat 
 | Ratio Extractor | `gpt-5.3-chat-latest` | Mid-tier; structured IRAC output |
 | Chronology | `gemini-3-flash-preview` | Lightweight; Mermaid generation |
 | Synthesis | `gpt-5.4-mini` | Strong reasoning; grounded final answer |
+| Verification rewrite | `gpt-5.4-mini` (same as synthesis) | Consistent voice when rewriting unsupported claims |
+| Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Small, fast, off-the-shelf; runs on `mps` / CPU |
 | Eval baseline | `gpt-5.4-mini` | Same model as synthesis for fair comparison |
 | Judge (draft) | `gemini-3-flash-preview` | Cross-provider stage-1 judgment |
 | Judge (critique) | `gpt-5.4` | Stage-2 critique and score finalisation |
@@ -149,24 +175,27 @@ This ensures diagrams render correctly both on first delivery and when the chat 
 
 ```mermaid
 graph TD
-    subgraph configs ["Three Configurations"]
-        Agent["Full Agent\nAll 5 nodes"]
+    subgraph configs ["Four Configurations"]
+        Agent["Full Agent\n6 nodes inc. verification"]
         Baseline["Plain LLM Baseline\nNo retrieval, no graph"]
-        Ablation["Ablation\nRetrieval + Synthesis only"]
+        Mega["Mega-Prompt Ablation\nRetrieval + single LLM call"]
+        NoRR["No-Reranker Ablation\nFull agent, USE_RERANKER=False"]
     end
 
-    TestQueries["20 Test Queries\n6 weeks, 4 query families"] --> Agent
+    TestQueries["22 Test Cases\nfactual / cross-modal /\nanalytical / conversational"] --> Agent
     TestQueries --> Baseline
-    TestQueries --> Ablation
+    TestQueries --> Mega
+    TestQueries --> NoRR
 
     Agent --> DraftJudge["Judge Draft\ngemini-3-flash-preview\nGroundedness + Relevancy 1-5"]
     Baseline --> DraftJudge
-    Ablation --> DraftJudge
+    Mega --> DraftJudge
+    NoRR --> DraftJudge
 
     DraftJudge --> CritiqueJudge["Judge Critique\ngpt-5.4\nFinalises score"]
 
-    CritiqueJudge --> Metrics["Metrics Export\nJSON + PNG plots"]
-    Agent -->|"per-node timing"| Metrics
+    CritiqueJudge --> Metrics["Metrics Export\nJSON + PNG plots\nhuman_spot_check.md"]
+    Agent -->|"per-node timing\n(inc. verification)"| Metrics
 ```
 
 ### Query families
@@ -186,9 +215,11 @@ graph TD
 - Optional recall-vs-pool (`--retrieval-pool-eval`, expanded retrieve + judge)
 - Source diversity (unique sources retrieved)
 - Total latency (seconds)
-- Per-node latency breakdown (full agent only)
+- Per-node latency breakdown (full agent, **including the verification node**)
 - Node trace (which nodes fired per query)
 - Cross-modal retrieval diagnostics on slide-targeted cases
+- Verification telemetry: per-case `unsupported_claims` + `rewrites_applied`, with a live `[verification]` counter logged after each case
+- IRAC compliance is reported as *not applicable* for `chronology` / `general` intents and excluded from the per-config average; the summary also exports `irac_applicable_count` and `irac_not_applicable_count`
 
 ## Key Design Decisions
 
@@ -196,14 +227,20 @@ graph TD
 |----------|-----------|
 | Single ChromaDB collection | Simpler retrieval with metadata filtering vs separate collections per week |
 | MMR over similarity search | Balances relevance with source diversity; configurable for ablation |
+| MMR → cross-encoder rerank (two-stage) | Preserves diversity in the candidate pool; restores precision by re-scoring against the query. Reranker is a small off-the-shelf cross-encoder kept as a lazy singleton |
+| `use_reranker` state field as ablation hook | Lets the eval flip the reranker per-run without monkey-patching the global config — the basis for the `ablation_no_reranker` configuration |
 | Separate per-node model assignments | Allows independent model swapping for ablation; lightweight models on cheap nodes |
 | `summary` intent runs both reasoning nodes | A query asking for "sequence of events and a summary" needs both the Mermaid diagram and the IRAC analysis; routing to `summary` instead of `chronology` guarantees both fire |
 | PRIMARY vs DERIVED evidence split in synthesis | Prevents the synthesis node from treating IRAC inferences as ground-truth facts |
+| Verification after synthesis (regex + rewrite) | Catches the residual failure mode where synthesis cites a Property Law case absent from the retrieved chunks. Cheap when nothing is wrong; one LLM rewrite call when something is. Failure of the rewrite is caught and the draft is preserved |
+| Verification rewrite preserves `\`\`\`mermaid` verbatim | The verification system prompt mandates that supported claims, headings, and any Mermaid code block survive the rewrite untouched — the diagram channel is never lost as a side-effect of fact-checking |
 | Mermaid block preserved verbatim in synthesis | Synthesis system prompt and user prompt both mandate verbatim copy of the `\`\`\`mermaid` block — prevents the LLM from converting diagrams to bullet points |
 | `render_message()` in Streamlit | All message renders (live and history replay) go through the same helper so diagrams survive multi-turn conversations |
 | `chat_history` separate from `query` | Keeps retrieval embeddings focused on the current question while still giving LLM nodes conversational context |
 | Deterministic document IDs | Safe re-indexing without duplicates |
 | `node_trace` in state | Tracks which nodes fired per query for ablation comparison and latency breakdown |
+| IRAC compliance returns *not applicable* for `chronology` / `general` | These intents legitimately do not produce IRAC structure; counting a zero would penalise the metric unfairly. The summary excludes N/A from the average and reports applicable / not-applicable counts separately |
+| Human spot-check log auto-generated | Five cases sampled deterministically (`seed=4205`) for human re-rating; supports qualitative validation of the LLM-as-a-judge pipeline with a small MAE / disagreement table |
 
 ## Beyond Property Law
 

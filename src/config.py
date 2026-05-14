@@ -11,10 +11,10 @@ EMBEDDING_MODEL = "zembed-1"
 EMBEDDING_DIMENSIONS = 2560
 
 # ── Per-Node Model Assignments ─────────────────────────────────────────────────
-# Prefix determines provider: "gemini-" → Google, "gpt-" → OpenAI, "claude-" → Anthropic
+# Prefix determines provider: "gemini-" → Google, "gpt-" → OpenAI
 VLM_MODEL = "gemini-2.5-pro"                # Slide description during indexing
 
-ROUTER_MODEL = "gemini-3.1-flash-lite-preview"                  # Lightweight: intent classification
+ROUTER_MODEL = "gemini-3.1-flash-lite"                  # Lightweight: intent classification
 RATIO_EXTRACTOR_MODEL = "gpt-5.3-chat-latest"     # Mid-tier: IRAC extraction
 CHRONOLOGY_MODEL = "gemini-3-flash-preview"              # Lightweight: Mermaid generation
 SYNTHESIS_MODEL = "gpt-5.4-mini"                 # Strong: final grounded answer

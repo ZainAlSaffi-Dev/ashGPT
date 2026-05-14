@@ -8,10 +8,10 @@ A multimodal LangGraph agent for INFS4205 that assists law students with Austral
 
 ## Architecture
 
-The agent is a **LangGraph** state machine with **conditional routing** after retrieval. The router classifies intent; specialised nodes run only when needed; synthesis always grounds the final answer in retrieved sources.
+The agent is a **LangGraph** state machine with **conditional routing** after retrieval. The router classifies intent; specialised nodes run only when needed; synthesis grounds the final answer in retrieved sources; a verification node fact-checks every cited case against the retrieved chunks before the answer leaves the graph.
 
 ```
-User Query → Router → Retrieval → ┬→ Ratio Extractor ──┬→ Synthesis → END
+User Query → Router → Retrieval → ┬→ Ratio Extractor ──┬→ Synthesis → Verification → END
                                   │                    │
                                   ├→ Chronology ───────┘
                                   │
@@ -20,40 +20,42 @@ User Query → Router → Retrieval → ┬→ Ratio Extractor ──┬→ Synt
 
 | Intent | Path |
 |--------|------|
-| `ratio` | Router → Retrieval → Ratio Extractor → Synthesis |
-| `chronology` | Router → Retrieval → Chronology → Synthesis |
-| `summary` | Router → Retrieval → Ratio Extractor → Chronology → Synthesis |
-| `general` | Router → Retrieval → Synthesis |
+| `ratio` | Router → Retrieval → Ratio Extractor → Synthesis → Verification |
+| `chronology` | Router → Retrieval → Chronology → Synthesis → Verification |
+| `summary` | Router → Retrieval → Ratio Extractor → Chronology → Synthesis → Verification |
+| `general` | Router → Retrieval → Synthesis → Verification |
 
 | Node | Role |
 |------|------|
 | **Router** | Classifies `ratio` / `chronology` / `summary` / `general`; may suggest a `week` metadata filter |
-| **Retrieval** | ChromaDB over text chunks and VLM-described slides; **MMR** + optional week/type filters |
+| **Retrieval** | ChromaDB over text chunks and VLM-described slides; **MMR** with optional week/type filters, followed by a **cross-encoder reranker** (`ms-marco-MiniLM-L-6-v2`) that re-scores the MMR pool and keeps the top-*k* |
 | **Ratio Extractor** | Isolates *ratio decidendi* and structured **IRAC** from retrieved material |
 | **Chronology** | Builds a timeline and emits **Mermaid.js** flowchart syntax |
 | **Synthesis** | Produces the student-facing answer with citations; treats upstream IRAC/chronology as *derived* and re-checks facts against primary sources |
+| **Verification** | Extracts every cited case (italicised or plain `X v Y`) from the final answer; flags any citation that does not appear in the retrieved chunk text and asks the synthesis model to remove or hedge the unsupported claim while preserving every supported claim and any `\`\`\`mermaid` block verbatim. Gated by `USE_VERIFICATION` in `src/config.py` |
 
 ### Multi-provider LLM layer
 
-Reasoning is **not** tied to a single vendor. `src/llm.py` dispatches by model name prefix (`gemini-` → Google GenAI, `gpt-` → OpenAI Responses API, `claude-` → Anthropic). Per-node assignments live in `src/config.py` (typical layout—edit there to experiment):
+Reasoning is **not** tied to a single vendor. `src/llm.py` dispatches by model name prefix (`gemini-` → Google GenAI, `gpt-` → OpenAI Responses API). Per-node assignments live in `src/config.py` (typical layout—edit there to experiment):
 
 | Role | Model (as configured) |
 |------|------------------------|
 | Slide description (indexing VLM) | `gemini-2.5-pro` |
-| Router | `gemini-3.1-flash-lite-preview` |
+| Router | `gemini-3.1-flash-lite` |
 | Ratio extractor | `gpt-5.3-chat-latest` |
 | Chronology | `gemini-3-flash-preview` |
 | Synthesis | `gpt-5.4-mini` |
 
 ### Evaluation & ablation (for quantitative comparison)
 
-`src/eval/run_evals.py` compares three configurations on the same queries:
+`src/eval/run_evals.py` compares **four configurations** on the same **22 cases** (six factual, five cross-modal, seven analytical, four conversational):
 
 | Configuration | What it measures |
 |---------------|------------------|
-| **Full agent** | Complete LangGraph pipeline |
+| **Full agent** | Complete LangGraph pipeline (router → retrieval+rerank → reasoning nodes → synthesis → verification) |
 | **Baseline** | Plain LLM (`BASELINE_MODEL`), no retrieval, no graph |
-| **Ablation** | Retrieval + synthesis only; **no** router-driven ratio or chronology nodes (`intent` fixed to `general`) |
+| **Mega-prompt ablation** | Retrieval + a single consolidated LLM call replacing all router-driven reasoning nodes |
+| **No-reranker ablation** | Full agent re-run with `USE_RERANKER=False`; isolates the contribution of the cross-encoder reranker |
 
 **Query families (explicit coursework coverage):** each row in `EVAL_CASES` inside `run_evals.py` is tagged with exactly one of:
 
@@ -66,9 +68,13 @@ Reasoning is **not** tied to a single vendor. `src/llm.py` dispatches by model n
 
 Outputs include `query_family`, `case_id`, and `case_rationale` per row in `eval_results.json`; `eval_summary.json` has `by_query_family` aggregates; `failure_analysis.md` opens with a **per-family** checklist and scores; `groundedness_by_query_family.png` plots the agent by family.
 
-**Retrieval metrics** (LLM-as-judge, binary relevance per chunk in ranked order): **precision@K**, **MRR** (reciprocal rank of the first relevant chunk), **Hit@K** (any relevant in the top-K), **NDCG@K**. Summaries and `retrieval_ranking_metrics.png` compare the full agent vs ablation. Optional **`--retrieval-pool-eval`** re-retrieves a larger pool (`EVAL_RETRIEVAL_POOL_K_*` in `config.py`), judges every chunk once, and adds **recall-vs-pool** = (relevant in production top-K) ÷ (relevant anywhere in pool) — a bounded proxy for recall, **not** full-corpus recall (document the limitation in your report).
+**Retrieval metrics** (LLM-as-judge, binary relevance per chunk in ranked order): **precision@K**, **MRR** (reciprocal rank of the first relevant chunk), **Hit@K** (any relevant in the top-K), **NDCG@K**. Summaries and `retrieval_ranking_metrics.png` compare the full agent vs ablations. `precision_with_vs_without_reranker.png` and `groundedness_four_way.png` chart the explicit reranker contribution and the four-way groundedness comparison. Optional **`--retrieval-pool-eval`** re-retrieves a larger pool (`EVAL_RETRIEVAL_POOL_K_*` in `config.py`), judges every chunk once, and adds **recall-vs-pool** = (relevant in production top-K) ÷ (relevant anywhere in pool) — a bounded proxy for recall, **not** full-corpus recall (document the limitation in your report).
 
-**Automated metrics** (besides judges): heuristic **Mermaid** structural checks, **IRAC** keyword coverage, **latency**, **per-node latency** (agent), **token usage** (via `src/llm.py`), and on cross-modal cases **retrieval diagnostics** (text vs slide chunk counts).
+**Automated metrics** (besides judges): heuristic **Mermaid** structural checks, **IRAC** keyword coverage (returns *not applicable* and is excluded from the average when intent is `chronology` or `general`, so the metric is not penalised for queries that legitimately do not produce IRAC structure), **latency**, **per-node latency** (agent, including verification), **token usage** (via `src/llm.py`), and on cross-modal cases **retrieval diagnostics** (text vs slide chunk counts).
+
+**Verification telemetry.** During the eval, after every case the harness emits a one-line `[verification] case N/M fired=X rewrites=Y unsupported_total=Z` counter, and per-case `verification_report` is persisted to `eval_results.json` with the flagged citations and a `rewrites_applied` flag.
+
+**Human spot-check log.** `eval_results/human_spot_check.md` is generated automatically: five cases are sampled deterministically (`seed=4205`) with blank human-rating fields. After filling, a small parser computes MAE and substantive-disagreement count against the LLM judge — a qualitative validation of the LLM-as-a-judge pipeline.
 
 After a run, see `eval_results/eval_summary.json` and the generated plots. Numbers change with models, prompts, and data—re-run the suite for your report.
 
@@ -107,7 +113,12 @@ The knowledge base is **strictly pre-indexed** (no runtime uploads). Two modalit
 - **Text**: PDF readings, tutorials, and notes — chunked (1500 characters, 300 overlap) and embedded with ZeroEntropy **`zembed-1`**.
 - **Image**: Lecture slides (**JPEG / PNG**) — described at index time by the configured **VLM**; descriptions are embedded as text with metadata (e.g. source, week).
 
-Retrieval uses **maximal marginal relevance (MMR)** with tunable λ and fetch-*k* in `src/config.py`.
+Retrieval is a two-stage dense pipeline:
+
+1. **MMR** (`λ=0.5`, `fetch_k=20`) over ChromaDB dense embeddings produces a diverse candidate pool — over-fetches `RERANKER_FETCH_K_TEXT=16` text and `RERANKER_FETCH_K_SLIDES=8` slide candidates when the reranker is enabled.
+2. **Cross-encoder reranker** (`cross-encoder/ms-marco-MiniLM-L-6-v2`, loaded lazily and cached as a module-level singleton) re-scores every (query, chunk) pair and truncates to the production *k* (`k_text=8`, `k_slides=4`). The reranker is gated by `USE_RERANKER` in `src/config.py` and can be flipped per-run via the `use_reranker` state field — this is the hook the no-reranker ablation uses.
+
+No BM25 / sparse retrieval is used; the pipeline is dense throughout.
 
 ## Setup
 
@@ -125,7 +136,7 @@ conda activate genai
 pip install -r requirements.txt
 
 cp .env.example .env
-# Edit .env: GOOGLE_API_KEY, ZEMBED_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY as needed
+# Edit .env: GOOGLE_API_KEY, ZEMBED_API_KEY, OPENAI_API_KEY as needed
 ```
 
 ### Data layout
@@ -186,23 +197,29 @@ pytest tests/ -v -m "not integration"    # no API keys
 ashGPT/
 ├── app.py                         # Streamlit frontend
 ├── src/
-│   ├── config.py                  # Paths, chunking, retrieval, per-node models
+│   ├── config.py                  # Paths, chunking, retrieval, per-node models,
+│   │                              # USE_RERANKER, RERANKER_FETCH_K_*, USE_VERIFICATION
 │   ├── llm.py                     # Unified multi-provider LLM dispatch + token tracking
 │   ├── embeddings.py              # ZeroEntropy embedding wrapper
 │   ├── indexing/
 │   │   └── build_index.py         # Multimodal ingestion (PDF + slide images)
 │   ├── agent/
-│   │   ├── state.py               # LangGraph state (TypedDict)
+│   │   ├── state.py               # LangGraph state (TypedDict); verification_report,
+│   │   │                          # use_reranker override field
 │   │   ├── chat_memory.py         # Trim/format history, retrieval query packing
-│   │   ├── tools.py               # Chroma retrieval (MMR, filters)
-│   │   ├── nodes.py               # Router, retrieval, ratio, chronology, synthesis
+│   │   ├── tools.py               # Chroma retrieval (MMR, filters) + reranker hook
+│   │   ├── reranker.py            # Cross-encoder reranker (lazy, singleton)
+│   │   ├── verification.py        # Case-citation extraction + unsupported-claim check
+│   │   ├── nodes.py               # Router, retrieval, ratio, chronology, synthesis,
+│   │   │                          # verification, mega-prompt ablation
 │   │   └── graph.py               # Conditional graph + run_query()
 │   └── eval/
-│       └── run_evals.py           # Baseline, ablation, judges, plots, failure notes
+│       └── run_evals.py           # Baseline, mega-prompt, no-reranker ablations,
+│                                  # judges, plots, failure notes, spot-check log
 ├── tests/
 ├── data/                          # Course materials (gitignored content typical)
 ├── chroma_db/                     # Local vector store
-├── eval_results/                  # Eval JSON + PNG plots (after run_evals)
+├── eval_results/                  # Eval JSON + PNG plots, human_spot_check.md
 ├── requirements.txt
 ├── pyproject.toml
 └── .env.example
@@ -221,7 +238,8 @@ The pattern is simpler than the legal frame suggests: any domain in which struct
 | Orchestration | LangGraph, LangChain |
 | Vector store | ChromaDB (local, persistent) |
 | Embeddings | ZeroEntropy `zembed-1` |
-| LLMs / VLM | Google Gemini, OpenAI, Anthropic (per `config.py`) |
-| Retrieval | MMR, metadata filters (week, doc type) |
+| LLMs / VLM | Google Gemini, OpenAI (per `config.py`) |
+| Retrieval | MMR + cross-encoder reranker (`ms-marco-MiniLM-L-6-v2`), metadata filters (week, doc type) |
+| Verification | Regex-based case-citation extraction + LLM rewrite of unsupported claims |
 | Frontend | Streamlit, streamlit-mermaid |
-| Evaluation | Two-stage groundedness judge (Gemini draft → OpenAI critique), single-stage relevancy & per-chunk precision (Gemini), structural checks, matplotlib plots |
+| Evaluation | Two-stage groundedness judge (Gemini draft → OpenAI critique), single-stage relevancy & per-chunk precision (Gemini), structural checks, four-config ablation (agent / baseline / mega-prompt / no-reranker), matplotlib plots, human spot-check log |
