@@ -13,8 +13,11 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import re
 import time
+
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 import streamlit as st
 from dotenv import load_dotenv
