@@ -7,6 +7,8 @@ import type { Route } from 'next';
 import { Send } from 'lucide-react';
 
 import { ChatMessage } from '@/components/ChatMessage';
+import { OnboardingChecklist } from '@/components/OnboardingChecklist';
+import { useOnboarding } from '@/lib/queries';
 import { useChat, type ChatTurn } from '@/lib/useChat';
 import { cn } from '@/lib/utils';
 
@@ -26,6 +28,7 @@ export interface ChatSurfaceProps {
 export function ChatSurface({ initialSessionId, initialTurns }: ChatSurfaceProps) {
   const router = useRouter();
   const queryClient = useQueryClient();
+  const onboarding = useOnboarding();
 
   const { turns, send, busy, nodeTrace } = useChat({
     initialSessionId,
@@ -96,12 +99,23 @@ export function ChatSurface({ initialSessionId, initialTurns }: ChatSurfaceProps
         className="flex-1 space-y-4 overflow-y-auto pr-1"
       >
         {turns.length === 0 && (
-          <div className="rounded-lg border border-parchment-warm bg-parchment p-6 text-center text-ink-muted">
-            <p className="font-serif text-lg text-ink">Start by asking a question.</p>
-            <p className="mt-2 text-sm">
-              Ask anything grounded in your uploaded notes, cases, or statutes.
-            </p>
-          </div>
+          <>
+            {!onboarding.isComplete && (
+              <OnboardingChecklist variant="full" />
+            )}
+            <div className="rounded-lg border border-parchment-warm bg-parchment p-6 text-center text-ink-muted">
+              <p className="font-serif text-lg text-ink">
+                {onboarding.readyFilesCount === 0
+                  ? 'Add a file, then ask a question.'
+                  : 'Start by asking a question.'}
+              </p>
+              <p className="mt-2 text-sm">
+                {onboarding.readyFilesCount === 0
+                  ? 'Chat answers are grounded in the documents in your library.'
+                  : 'Ask anything grounded in your uploaded notes, cases, or statutes.'}
+              </p>
+            </div>
+          </>
         )}
         {turns.map((t) => (
           <ChatMessage key={t.id} turn={t} />
