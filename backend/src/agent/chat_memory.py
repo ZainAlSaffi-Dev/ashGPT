@@ -7,12 +7,16 @@ still giving the router and synthesis models conversational context.
 
 from __future__ import annotations
 
+import logging
+
 from src.agent.state import AgentState, ChatMessage
 from src.config import (
     CHAT_HISTORY_MAX_ASSISTANT_TAIL_CHARS,
     CHAT_HISTORY_MAX_CHARS_PER_MESSAGE,
     CHAT_HISTORY_MAX_MESSAGES,
 )
+
+log = logging.getLogger(__name__)
 
 
 def prepare_chat_history_for_run(
@@ -82,3 +86,71 @@ def get_chat_history(state: AgentState) -> list[ChatMessage]:
     """Safe read of ``chat_history`` from graph state."""
     h = state.get("chat_history")
     return h if isinstance(h, list) else []
+
+
+_REWRITER_SYSTEM = (
+    "You rewrite a student's follow-up message into a self-contained legal "
+    "search query. The query is fed into a vector + BM25 retriever — it must "
+    "carry every referent the search needs (case names, doctrines, statutory "
+    "section numbers) so that none of them have to be inferred from a "
+    "transcript.\n\n"
+    "Rules:\n"
+    "1. Resolve pronouns and demonstratives (\"it\", \"that case\", \"the "
+    "second one\") using the transcript.\n"
+    "2. Expand abbreviated case names to their full form when the transcript "
+    "shows the full name earlier.\n"
+    "3. Keep the user's *intent verb* (\"explain\", \"summarise\", \"give me "
+    "the ratio\") intact.\n"
+    "4. Output ONE sentence (no preamble, no markdown).\n"
+    "5. If the latest message is already self-contained, return it unchanged."
+)
+
+
+def rewrite_followup_query(
+    current_query: str,
+    messages: list[ChatMessage],
+    *,
+    llm_call=None,
+    model: str | None = None,
+) -> str:
+    """LLM-based coreference rewriter for follow-up retrieval.
+
+    Resolves pronouns / expands abbreviated case names so the retriever sees
+    a self-contained query. ``llm_call`` and ``model`` are injectable for
+    tests; production callers pass the real ``llm.llm_call`` and
+    ``ROUTER_MODEL``. Falls back to ``current_query`` on any failure.
+    """
+    if not messages or not current_query.strip():
+        return current_query
+    # Lazy import to keep this module's surface small and break a circular
+    # import (src.llm imports from src.config which is fine, but tests may
+    # want to avoid network).
+    if llm_call is None:
+        from src.llm import llm_call as _llm_call
+
+        llm_call = _llm_call
+    if model is None:
+        from src.config import ROUTER_MODEL
+
+        model = ROUTER_MODEL
+
+    transcript = format_transcript_for_llm(messages)
+    prompt = (
+        f"CONVERSATION SO FAR:\n{transcript}\n\n"
+        f"LATEST STUDENT MESSAGE:\n{current_query}\n\n"
+        "Rewrite the latest message as a standalone search query."
+    )
+    try:
+        rewritten = llm_call(prompt, model=model, system_instruction=_REWRITER_SYSTEM)
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("query rewriter failed (%s); using raw query", exc)
+        return current_query
+    # Cap to a single line — the rewriter is told to return one sentence but
+    # we don't fully trust it. Strip everything past the first newline before
+    # cleaning quotes so wrapping quotes still strip when the model adds
+    # trailing junk.
+    rewritten = (rewritten or "").strip().split("\n", 1)[0].strip()
+    rewritten = rewritten.strip('"').strip("'").strip()
+    if not rewritten:
+        return current_query
+    return rewritten

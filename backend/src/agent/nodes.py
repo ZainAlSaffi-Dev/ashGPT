@@ -21,6 +21,7 @@ from src.agent.chat_memory import (
     build_retrieval_query,
     format_transcript_for_llm,
     get_chat_history,
+    rewrite_followup_query,
 )
 from src.agent.state import AgentState
 from src.agent.tools import retrieve_all
@@ -212,22 +213,41 @@ def router_node(state: AgentState) -> dict:
 
 @_timed("retrieval")
 def retrieval_node(state: AgentState) -> dict:
-    """Query ChromaDB for relevant text chunks and slide descriptions.
+    """Retrieve text + image chunks from the user's vector store.
 
     Reads:  query, week_filter, chat_history, user_id (tenant namespace),
             use_reranker (optional override)
-    Writes: retrieved_texts, retrieved_slides, node_trace
+    Writes: retrieved_texts, retrieved_slides, rewritten_query, node_trace
     """
+    from src.config import USE_QUERY_REWRITER
+
     history = get_chat_history(state)
-    search_q = build_retrieval_query(state["query"], history)
+    raw_query = state["query"]
+
+    # On follow-up turns optionally run a coreference rewrite so the retriever
+    # sees a self-contained query ("explain the elements" → "Explain the
+    # elements of adverse possession in Mabo v Queensland (No 2)"). Skip on
+    # first turns — no transcript to resolve and the LLM hop is dead weight.
+    rewritten_query: str | None = None
+    if history and USE_QUERY_REWRITER:
+        rewritten_query = rewrite_followup_query(raw_query, history)
+        if rewritten_query == raw_query:
+            rewritten_query = None  # rewriter returned the input unchanged
+
+    embed_query = rewritten_query or raw_query
+    # Always run the deterministic packer on top — it appends the prior
+    # assistant excerpt so the dense embedding has even more anchor signal.
+    search_q = build_retrieval_query(embed_query, history)
+
     week = state.get("week_filter")
     namespace = state.get("user_id")
     use_reranker_override = state.get("use_reranker")
     log.info(
-        "RetrievalNode: searching KB (week=%s, ns=%s, follow_up=%s, rerank_override=%s)",
+        "RetrievalNode: searching KB (week=%s, ns=%s, follow_up=%s, rewrote=%s, rerank_override=%s)",
         week,
         namespace,
         bool(history),
+        bool(rewritten_query),
         use_reranker_override,
     )
 
@@ -248,12 +268,15 @@ def retrieval_node(state: AgentState) -> dict:
         len(slides),
         sub_timings,
     )
-    return {
+    out: dict = {
         "retrieved_texts": texts,
         "retrieved_slides": slides,
         "node_trace": _append_trace(state, "retrieval"),
         "_timing_sub": sub_timings or None,
     }
+    if rewritten_query:
+        out["rewritten_query"] = rewritten_query
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════

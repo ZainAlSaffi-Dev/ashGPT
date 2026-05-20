@@ -86,10 +86,17 @@ ESCALATION_MODEL = "gpt-5.4"  # Stronger than the default mini synthesis
 USE_ANSWER_CACHE = True
 ANSWER_CACHE_TTL_DAYS = 7
 
-# ── Multi-turn chat (Streamlit session → AgentState.chat_history) ─────────────
+# ── Multi-turn chat (history + follow-up rewriter) ────────────────────────────
 CHAT_HISTORY_MAX_MESSAGES = 24
 CHAT_HISTORY_MAX_CHARS_PER_MESSAGE = 3500
 CHAT_HISTORY_MAX_ASSISTANT_TAIL_CHARS = 1200
+
+# Coreference-resolved retrieval query. When enabled and ``chat_history`` is
+# non-empty, retrieval_node calls a small router-tier model to expand
+# pronouns / abbreviated case names into a self-contained search query
+# before embedding. Adds one LLM hop (~200-400ms) — gate on follow-ups only,
+# never on first turns.
+USE_QUERY_REWRITER = True
 
 # ── Eval: optional deep retrieval pool (recall-vs-pool); larger = more judge API calls
 EVAL_RETRIEVAL_POOL_K_TEXT = 20
