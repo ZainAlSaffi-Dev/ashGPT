@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import chromadb
 from dotenv import load_dotenv
@@ -485,21 +486,42 @@ def retrieve_all(
     namespace: str | None = None,
     timings: dict | None = None,
 ) -> tuple[list[RetrievedDocument], list[RetrievedDocument]]:
-    """Convenience wrapper that retrieves both text and slides in one call."""
-    texts = retrieve_texts(
-        query,
-        week=week,
-        k=k_text,
-        use_reranker=use_reranker,
-        namespace=namespace,
-        timings=timings,
-    )
-    slides = retrieve_slides(
-        query,
-        week=week,
-        k=k_slides,
-        use_reranker=use_reranker,
-        namespace=namespace,
-        timings=timings,
-    )
+    """Retrieve text and slide chunks concurrently.
+
+    The two legs are independent (different metadata filters, different
+    candidate pools) and each performs blocking I/O (ZeroEntropy embed,
+    Chroma query, BM25 in-memory search, Cohere rerank REST call). Running
+    them in a 2-worker thread pool halves the wall-clock spent in retrieval
+    on the typical hot path. Embeddings are deduped by a thread-safe LRU
+    on the ZeroEntropyEmbeddings singleton (see src/embeddings.py).
+    """
+    t_dict: dict[str, float] = {}
+    s_dict: dict[str, float] = {}
+    t_start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="retrieve") as ex:
+        ft = ex.submit(
+            retrieve_texts,
+            query,
+            week=week,
+            k=k_text,
+            use_reranker=use_reranker,
+            namespace=namespace,
+            timings=t_dict,
+        )
+        fs = ex.submit(
+            retrieve_slides,
+            query,
+            week=week,
+            k=k_slides,
+            use_reranker=use_reranker,
+            namespace=namespace,
+            timings=s_dict,
+        )
+        texts = ft.result()
+        slides = fs.result()
+    parallel_ms = round((time.perf_counter() - t_start) * 1000, 1)
+    if timings is not None:
+        timings.update(t_dict)
+        timings.update(s_dict)
+        timings["retrieve_all_parallel_ms"] = parallel_ms
     return texts, slides
