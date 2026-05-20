@@ -14,7 +14,13 @@ from src.storage.db import User, get_engine, get_or_create_user, get_session
 async def current_claims(
     authorization: Annotated[str | None, Header()] = None,
     x_dev_user: Annotated[str | None, Header(alias="X-Dev-User")] = None,
+    x_user_id: Annotated[str | None, Header(alias="X-User-Id")] = None,
 ) -> ClerkClaims:
+    # When the edge Worker has already verified the Clerk JWT it forwards the
+    # resolved user via X-User-Id. The container is only reachable through the
+    # Worker (Durable Object binding) so we trust that header in prod.
+    if x_user_id:
+        return ClerkClaims(user_id=x_user_id, email=None, raw={"sub": x_user_id, "via": "worker"})
     try:
         return await require_user(authorization=authorization, x_dev_user=x_dev_user)
     except AuthError as e:
