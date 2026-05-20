@@ -2,8 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Syntax highlighting for fenced code blocks in chat answers. */
+@import 'highlight.js/styles/github.css';
+
 :root {
   color-scheme: light;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
 }
 
 html,

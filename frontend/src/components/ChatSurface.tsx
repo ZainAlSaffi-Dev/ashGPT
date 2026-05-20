@@ -42,19 +42,39 @@ export function ChatSurface({ initialSessionId, initialTurns }: ChatSurfaceProps
 
   const [draft, setDraft] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Auto-scroll only while the user is parked at the bottom. If they scroll
+  // up mid-stream we leave them alone until they scroll back down.
   useEffect(() => {
-    scrollRef.current?.scrollTo({
-      top: scrollRef.current.scrollHeight,
-      behavior: 'smooth',
-    });
+    const el = scrollRef.current;
+    if (!el) return;
+    if (!stickToBottomRef.current) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
   }, [turns]);
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distanceFromBottom < 80;
+  };
+
+  // Textarea auto-grow (rows 2 → max ~8).
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 8 * 24)}px`;
+  }, [draft]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!draft.trim()) return;
     const q = draft;
     setDraft('');
+    stickToBottomRef.current = true;
     await send(q);
   };
 
@@ -70,7 +90,11 @@ export function ChatSurface({ initialSessionId, initialTurns }: ChatSurfaceProps
         </button>
       </div>
 
-      <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto pr-1">
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        className="flex-1 space-y-4 overflow-y-auto pr-1"
+      >
         {turns.length === 0 && (
           <div className="rounded-lg border border-parchment-warm bg-parchment p-6 text-center text-ink-muted">
             <p className="font-serif text-lg text-ink">Start by asking a question.</p>
@@ -91,6 +115,7 @@ export function ChatSurface({ initialSessionId, initialTurns }: ChatSurfaceProps
 
       <form onSubmit={submit} className="mt-4 flex items-end gap-2">
         <textarea
+          ref={textareaRef}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
@@ -101,7 +126,7 @@ export function ChatSurface({ initialSessionId, initialTurns }: ChatSurfaceProps
           }}
           placeholder="Ask about your notes…"
           rows={2}
-          className="flex-1 resize-none rounded-lg border border-parchment-warm bg-parchment px-4 py-3 text-ink placeholder:text-ink-soft focus:border-accent focus:outline-none"
+          className="flex-1 resize-none overflow-y-auto rounded-lg border border-parchment-warm bg-parchment px-4 py-3 text-ink placeholder:text-ink-soft focus:border-accent focus:outline-none"
         />
         <button
           type="submit"
