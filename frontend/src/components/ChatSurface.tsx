@@ -30,7 +30,7 @@ export function ChatSurface({ initialSessionId, initialTurns }: ChatSurfaceProps
   const queryClient = useQueryClient();
   const onboarding = useOnboarding();
 
-  const { turns, send, busy, nodeTrace } = useChat({
+  const { turns, send, busy, nodeTrace, sessionId } = useChat({
     initialSessionId,
     initialTurns,
     onSessionCreated: (id) => {
@@ -42,6 +42,19 @@ export function ChatSurface({ initialSessionId, initialTurns }: ChatSurfaceProps
       queryClient.invalidateQueries({ queryKey: ['sessions'] });
     },
   });
+
+  // Once a streamed turn lands, invalidate the cached message history for
+  // this session so a tab reload / browser-back fetches the persisted
+  // assistant row (with sources / irac / mermaid). Local state already has
+  // everything for the current view — this just primes the cache.
+  const lastBusyRef = useRef(busy);
+  useEffect(() => {
+    if (lastBusyRef.current && !busy && sessionId) {
+      queryClient.invalidateQueries({ queryKey: ['messages', sessionId] });
+      queryClient.invalidateQueries({ queryKey: ['sessions'] });
+    }
+    lastBusyRef.current = busy;
+  }, [busy, sessionId, queryClient]);
 
   const [draft, setDraft] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);

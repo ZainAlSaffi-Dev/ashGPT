@@ -46,6 +46,9 @@ export default function ChatSessionPage({ params }: PageProps) {
     role: m.role,
     content: m.content,
     intent: (m.intent ?? null) as ChatTurn['intent'],
+    sources: m.sources ?? undefined,
+    irac: m.irac ?? undefined,
+    mermaid: m.mermaid ?? undefined,
     verification: m.verification ?? undefined,
     latency_ms: m.latency_ms ?? undefined,
   }));

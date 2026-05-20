@@ -50,6 +50,9 @@ export interface Message {
   content: string;
   intent?: string | null;
   retrieved_chunk_ids?: string[] | null;
+  sources?: SourceHit[] | null;
+  irac?: string | null;
+  mermaid?: string | null;
   latency_ms?: number | null;
   verification?: VerificationReport | null;
   created_at: string;

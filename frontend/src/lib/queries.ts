@@ -50,6 +50,12 @@ export function useMessages(sessionId: string | null | undefined) {
       const token = (await getToken()) ?? undefined;
       return listMessages(sessionId!, token);
     },
+    // Persisted messages are immutable, so navigation back into a chat
+    // shouldn't trigger a refetch on focus. New turns are pushed into
+    // local useChat state and invalidated by ChatSurface when the
+    // assistant message is committed server-side.
+    staleTime: 60_000,
+    gcTime: 10 * 60_000,
   });
 }
 

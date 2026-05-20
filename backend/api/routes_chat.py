@@ -154,6 +154,9 @@ async def chat(
                 content=final,
                 intent=result.get("intent"),
                 retrieved_chunk_ids=[s.get("source") for s in sources if s.get("source")],
+                sources=sources,
+                irac=result.get("irac_analysis"),
+                mermaid=result.get("mermaid_diagram"),
                 latency_ms=latency_ms,
                 verification=verification,
             )

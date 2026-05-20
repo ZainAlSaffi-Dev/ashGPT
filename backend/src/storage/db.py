@@ -124,6 +124,12 @@ class Message(Base):
     role: Mapped[str] = mapped_column(String(16))  # user | assistant
     content: Mapped[str] = mapped_column(Text)
     retrieved_chunk_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    # Full SourceHit list (source/doc_type/week/snippet) so reloaded
+    # conversations can rehydrate the citation popovers without re-running
+    # retrieval. retrieved_chunk_ids stays for cheaper joins / analytics.
+    sources: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    irac: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mermaid: Mapped[str | None] = mapped_column(Text, nullable=True)
     intent: Mapped[str | None] = mapped_column(String(32), nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tokens_in: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -231,11 +237,41 @@ async def get_session(engine: AsyncEngine | None = None) -> AsyncIterator[AsyncS
 
 
 async def init_db(engine: AsyncEngine | None = None) -> None:
-    """Create all tables (for v1 — Alembic migrations come at deploy time)."""
+    """Create all tables and apply lightweight idempotent migrations.
+
+    ``create_all`` only creates *missing* tables — it doesn't ALTER existing
+    ones. For columns added after the first deploy we issue
+    ``ADD COLUMN IF NOT EXISTS`` so production rows pick up new fields
+    without an out-of-band migration step. Once we have Alembic wired up
+    these inline migrations should move into versioned scripts.
+    """
     if engine is None:
         engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _apply_inline_migrations(conn)
+
+
+async def _apply_inline_migrations(conn) -> None:  # type: ignore[no-untyped-def]
+    """Run ``ADD COLUMN IF NOT EXISTS`` for columns added post-v1.
+
+    Postgres supports the ``IF NOT EXISTS`` clause; SQLite (used by tests)
+    does not, but its ``create_all`` already produces the up-to-date schema
+    on a fresh DB, so we just skip the ALTERs there.
+    """
+    from sqlalchemy import text
+
+    dialect = conn.dialect.name
+    if dialect != "postgresql":
+        return
+
+    statements = (
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS sources JSONB",
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS irac TEXT",
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS mermaid TEXT",
+    )
+    for stmt in statements:
+        await conn.execute(text(stmt))
 
 
 async def get_or_create_user(session: AsyncSession, clerk_id: str, email: str | None = None) -> User:

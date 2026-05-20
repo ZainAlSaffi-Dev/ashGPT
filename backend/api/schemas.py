@@ -28,12 +28,25 @@ class CreateSessionRequest(BaseModel):
     title: str | None = None
 
 
+class SourceHitOut(BaseModel):
+    source: str | None = None
+    doc_type: str | None = None
+    week: str | None = None
+    snippet: str = ""
+
+
 class MessageOut(BaseModel):
     id: str
     role: Literal["user", "assistant"]
     content: str
     intent: str | None = None
     retrieved_chunk_ids: list[str] | None = None
+    # Full per-citation rehydration payload so the frontend can wire up
+    # the source popovers on reloaded conversations without re-running
+    # retrieval.
+    sources: list[SourceHitOut] | None = None
+    irac: str | None = None
+    mermaid: str | None = None
     latency_ms: int | None = None
     verification: dict[str, Any] | None = None
     created_at: datetime
