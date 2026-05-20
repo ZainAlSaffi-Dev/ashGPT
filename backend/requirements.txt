@@ -13,6 +13,9 @@ pymupdf>=1.25.0
 Pillow>=11.0.0
 python-docx>=1.1.0
 
+# Hybrid retrieval (BM25 fused with dense via RRF)
+rank-bm25>=0.2.2
+
 # Reranking (sentence-transformers/torch removed in Phase 5; replaced by Cohere API)
 sentence-transformers>=3.0.0
 torch>=2.12.0

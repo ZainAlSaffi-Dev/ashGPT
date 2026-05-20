@@ -48,7 +48,19 @@ RETRIEVAL_STRATEGY = "mmr"
 MMR_LAMBDA = 0.5
 MMR_FETCH_K = 20
 
-# ── Cross-encoder reranker (post-MMR) ─────────────────────────────────────────
+# ── Hybrid retrieval (BM25 + dense fused via Reciprocal Rank Fusion) ──────────
+# When enabled, retrieval runs two legs (lexical BM25 + dense MMR) and fuses
+# their ranked lists via RRF before reranking. Boosts precision on legal text
+# where exact case names + statutory references benefit from BM25's term-match,
+# while semantic queries still surface via dense.
+USE_HYBRID_RETRIEVAL = True
+BM25_FETCH_K_TEXT = 30        # BM25 returns top-K candidates per leg
+BM25_FETCH_K_SLIDES = 12
+RRF_K = 60                    # RRF constant; 60 is the canonical default
+HYBRID_FUSED_K_TEXT = 16      # RRF reduces to this many before reranking
+HYBRID_FUSED_K_SLIDES = 8
+
+# ── Cross-encoder reranker (post-MMR / post-fusion) ───────────────────────────
 # When enabled, MMR over-fetches RERANKER_FETCH_K_* candidates and the cross
 # encoder reduces to the original retrieval k. Diversity (MMR) is preserved as
 # the candidate pool; precision is lifted by re-scoring against the query.
