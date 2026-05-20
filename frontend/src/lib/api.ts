@@ -18,7 +18,7 @@ import type {
   SessionSummary,
 } from './types';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? '/api';
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/api';
 
 export class ApiError extends Error {
   constructor(public status: number, public body: string) {

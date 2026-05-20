@@ -44,7 +44,7 @@ export async function streamChat(
     typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_DEV_USER : undefined;
   if (devUser && !opts?.token) headers.set('X-Dev-User', devUser);
 
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? '/api';
+  const apiBase = process.env.NEXT_PUBLIC_API_BASE || '/api';
   const res = await fetch(`${apiBase}/chat`, {
     method: 'POST',
     body: JSON.stringify(body),
