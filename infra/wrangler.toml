@@ -3,6 +3,16 @@ main = "worker/src/index.ts"
 compatibility_date = "2026-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Workers Logs: surface console.log/error from the Worker in the dashboard
+# (and `wrangler tail`). invocation_logs adds the request/response summary.
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+
 # ── Backend container ────────────────────────────────────────────────────────
 # Cloudflare Containers run the FastAPI app close to the edge. The Worker
 # (above) sits in front to validate Clerk JWTs, issue R2 presigned PUTs, and
