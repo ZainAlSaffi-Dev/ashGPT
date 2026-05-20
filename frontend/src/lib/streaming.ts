@@ -8,7 +8,13 @@
 
 import { createParser } from 'eventsource-parser';
 
-import type { ChatStreamEvents, Intent, SourceHit, VerificationReport } from './types';
+import type {
+  ChatHistoryOverflow,
+  ChatStreamEvents,
+  Intent,
+  SourceHit,
+  VerificationReport,
+} from './types';
 import { resolveApiBase } from './api';
 
 export interface ChatStreamHandlers {
@@ -17,6 +23,7 @@ export interface ChatStreamHandlers {
   onIRAC?: (irac: string) => void;
   onMermaid?: (diagram: string) => void;
   onVerification?: (report: VerificationReport) => void;
+  onHistoryOverflow?: (overflow: ChatHistoryOverflow) => void;
   onAnswerChunk?: (text: string) => void;
   onDone?: (payload: {
     session_id: string;
@@ -103,6 +110,9 @@ export function dispatch(
       break;
     case 'verification':
       handlers.onVerification?.((data.report as VerificationReport) ?? {});
+      break;
+    case 'history_overflow':
+      handlers.onHistoryOverflow?.(data as unknown as ChatHistoryOverflow);
       break;
     case 'answer_chunk':
       handlers.onAnswerChunk?.(String(data.text ?? ''));

@@ -26,10 +26,12 @@ export function ChatMessage({ turn }: Props) {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18, ease: 'easeOut' }}
       className={cn(
-        'rounded-2xl px-4 py-3 max-w-[90%]',
+        'rounded-2xl px-4 py-3',
+        // Assistant bubbles stretch wider for readable prose; user bubbles
+        // stay narrow so the eye can follow the back-and-forth.
         isUser
-          ? 'ml-auto bg-accent text-parchment shadow-sm'
-          : 'mr-auto bg-parchment text-ink ring-1 ring-parchment-warm',
+          ? 'ml-auto max-w-[80%] bg-accent text-parchment shadow-sm'
+          : 'mr-auto w-full bg-parchment text-ink ring-1 ring-parchment-warm',
       )}
     >
       <div className="prose prose-sm max-w-none">
@@ -61,6 +63,14 @@ export function ChatMessage({ turn }: Props) {
           ⚠ Some citations could not be verified in retrieved sources.
         </p>
       )}
+      {turn.historyOverflow &&
+        (turn.historyOverflow.dropped_turns > 0 ||
+          turn.historyOverflow.truncated_messages > 0) && (
+          <p className="mt-2 text-[11px] text-ink-soft">
+            ⓘ Trimmed older context to fit ({turn.historyOverflow.dropped_turns} turn(s) dropped,{' '}
+            {turn.historyOverflow.truncated_messages} message(s) truncated). Start a new chat for a fresh window.
+          </p>
+        )}
       {turn.latency_ms != null && !turn.streaming && (
         <p className="mt-2 text-[10px] uppercase tracking-wide text-ink-soft">
           {turn.intent ?? 'general'} · {turn.latency_ms} ms

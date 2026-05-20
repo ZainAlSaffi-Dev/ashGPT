@@ -15,12 +15,18 @@ export interface VerificationReport {
   details?: Record<string, unknown>;
 }
 
+export interface ChatHistoryOverflow {
+  dropped_turns: number;
+  truncated_messages: number;
+}
+
 export interface ChatStreamEvents {
   node?: { node: string; session_id?: string };
   sources?: { sources: SourceHit[] };
   irac?: { irac: string };
   mermaid?: { diagram: string };
   verification?: { report: VerificationReport };
+  history_overflow?: ChatHistoryOverflow;
   answer_chunk?: { text: string };
   done?: {
     session_id: string;

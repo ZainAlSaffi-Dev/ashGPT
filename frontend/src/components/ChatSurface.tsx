@@ -82,7 +82,7 @@ export function ChatSurface({ initialSessionId, initialTurns }: ChatSurfaceProps
   };
 
   return (
-    <div className="mx-auto flex h-full max-w-4xl flex-col px-6 py-6">
+    <div className="mx-auto flex h-full w-full max-w-5xl flex-col px-4 py-6 lg:px-8">
       <div className="mb-4 flex items-center justify-between">
         <h1 className="font-serif text-2xl text-ink">Chat</h1>
         <button

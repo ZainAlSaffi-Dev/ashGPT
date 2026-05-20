@@ -1,9 +1,9 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from '@clerk/nextjs';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Route } from 'next';
 import {
   BookMarked,
@@ -12,9 +12,10 @@ import {
   MessageSquare,
   Plus,
   Settings,
+  Trash2,
 } from 'lucide-react';
 
-import { listSessions } from '@/lib/api';
+import { deleteSession, listSessions } from '@/lib/api';
 import type { SessionSummary } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -27,6 +28,8 @@ const nav = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
+  const queryClient = useQueryClient();
   const { getToken, isSignedIn } = useAuth();
 
   const sessionsQuery = useQuery({
@@ -37,6 +40,18 @@ export function Sidebar() {
       return listSessions(token);
     },
   });
+
+  const onDeleteSession = async (id: string, title: string) => {
+    if (!confirm(`Delete "${title || 'this chat'}"? This can't be undone.`)) return;
+    const token = (await getToken()) ?? undefined;
+    await deleteSession(id, token);
+    await queryClient.invalidateQueries({ queryKey: ['sessions'] });
+    // If the deleted session is the one currently routed to, bounce back to
+    // the landing route so we don't render against a 404 session.
+    if (pathname === `/chat/${id}`) {
+      router.push('/chat');
+    }
+  };
 
   return (
     <aside className="flex h-full w-60 shrink-0 flex-col border-r border-parchment-warm bg-parchment p-4">
@@ -84,6 +99,7 @@ export function Sidebar() {
           sessions={sessionsQuery.data ?? []}
           activePath={pathname}
           isLoading={sessionsQuery.isLoading}
+          onDelete={onDeleteSession}
         />
       </div>
     </aside>
@@ -94,10 +110,12 @@ function SessionList({
   sessions,
   activePath,
   isLoading,
+  onDelete,
 }: {
   sessions: SessionSummary[];
   activePath: string;
   isLoading: boolean;
+  onDelete: (id: string, title: string) => void | Promise<void>;
 }) {
   if (isLoading) {
     return <div className="px-3 py-2 text-xs text-ink-soft">Loading…</div>;
@@ -113,11 +131,11 @@ function SessionList({
         const href = `/chat/${s.id}` as Route;
         const active = activePath === href;
         return (
-          <li key={s.id}>
+          <li key={s.id} className="group relative">
             <Link
               href={href}
               className={cn(
-                'block truncate rounded-md px-3 py-1.5 text-sm transition',
+                'block truncate rounded-md px-3 py-1.5 pr-8 text-sm transition',
                 active
                   ? 'bg-parchment-warm text-ink'
                   : 'text-ink-muted hover:bg-parchment-warm hover:text-ink',
@@ -126,6 +144,18 @@ function SessionList({
             >
               {s.title || 'Untitled chat'}
             </Link>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                void onDelete(s.id, s.title);
+              }}
+              aria-label={`Delete ${s.title || 'chat'}`}
+              className="absolute right-1.5 top-1/2 hidden -translate-y-1/2 rounded p-1 text-ink-soft transition hover:bg-parchment hover:text-red-600 group-hover:block"
+            >
+              <Trash2 className="h-3 w-3" />
+            </button>
           </li>
         );
       })}

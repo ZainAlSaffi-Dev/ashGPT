@@ -5,7 +5,10 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { listFiles, listMessages, listSessions } from './api';
 
-/** Files list, cached so library + exam + onboarding share one fetch. */
+/** Files list, cached so library + exam + onboarding share one fetch.
+ *  Polls every 4 s while any file is still in a non-terminal status
+ *  (``uploaded`` / ``processing`` / ``queued``) so the user sees the
+ *  transition to ``ready`` without manual refresh. */
 export function useFiles() {
   const { getToken, isSignedIn } = useAuth();
   return useQuery({
@@ -14,6 +17,14 @@ export function useFiles() {
     queryFn: async () => {
       const token = (await getToken()) ?? undefined;
       return listFiles(token);
+    },
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (!data || data.length === 0) return false;
+      const inFlight = data.some((f) =>
+        f.status === 'uploaded' || f.status === 'processing' || f.status === 'queued',
+      );
+      return inFlight ? 4_000 : false;
     },
   });
 }

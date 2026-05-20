@@ -4,7 +4,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '@clerk/nextjs';
 
 import { streamChat } from './streaming';
-import type { Intent, SourceHit, VerificationReport } from './types';
+import type {
+  ChatHistoryOverflow,
+  Intent,
+  SourceHit,
+  VerificationReport,
+} from './types';
 
 export interface ChatTurn {
   id: string;
@@ -17,6 +22,7 @@ export interface ChatTurn {
   verification?: VerificationReport;
   latency_ms?: number;
   streaming?: boolean;
+  historyOverflow?: ChatHistoryOverflow;
 }
 
 export interface UseChatOptions {
@@ -82,6 +88,8 @@ export function useChat(opts: UseChatOptions = {}) {
             onIRAC: (irac) => updateAssistant({ irac }),
             onMermaid: (mermaid) => updateAssistant({ mermaid }),
             onVerification: (verification) => updateAssistant({ verification }),
+            onHistoryOverflow: (overflow) =>
+              updateAssistant({ historyOverflow: overflow }),
             onAnswerChunk: (text) =>
               setTurns((t) =>
                 t.map((x) =>
