@@ -2,9 +2,11 @@
 
 Three concrete implementations behind one protocol:
 
-  * ``ChromaVectorStore``     — local Chroma collection (dev).
-  * ``PgVectorStore``         — Postgres + pgvector (docker compose / managed).
-  * ``CloudflareVectorize``   — Cloudflare Vectorize REST API (prod).
+  * ``PgVectorStore``         — Postgres + pgvector (dev via docker compose,
+                                prod via Neon).
+  * ``CloudflareVectorize``   — Cloudflare Vectorize REST API (optional
+                                future serverless backend).
+  * ``InMemoryVectorStore``   — unit-test fixture (no persistence).
 
 All search calls take a ``namespace`` (user_id) so multi-tenant isolation is
 enforced at the data layer. Adapters store ``namespace`` as filterable metadata
@@ -76,93 +78,6 @@ class VectorStore(Protocol):
         ...
 
 
-# ── Chroma (local dev) ────────────────────────────────────────────────────────
-
-
-class ChromaVectorStore:
-    """Persistent Chroma collection. Namespace stored on metadata."""
-
-    def __init__(self, collection_name: str, persist_dir: str):
-        import chromadb
-
-        self._client = chromadb.PersistentClient(path=persist_dir)
-        self._collection = self._client.get_or_create_collection(
-            name=collection_name, metadata={"hnsw:space": "cosine"}
-        )
-
-    def upsert(self, items: Iterable[VectorItem]) -> None:
-        items = list(items)
-        if not items:
-            return
-        ids = [it.id for it in items]
-        embeddings = [it.vector for it in items]
-        documents = [it.content for it in items]
-        metadatas = [{**it.metadata, "namespace": it.namespace} for it in items]
-        self._collection.upsert(
-            ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas
-        )
-
-    def search(
-        self,
-        query_vector: list[float],
-        namespace: str,
-        k: int = 8,
-        where: dict[str, Any] | None = None,
-    ) -> list[SearchHit]:
-        ns_filter: dict[str, Any] = {"namespace": {"$eq": namespace}}
-        combined: dict[str, Any]
-        if where:
-            combined = {"$and": [ns_filter, where]}
-        else:
-            combined = ns_filter
-
-        res = self._collection.query(
-            query_embeddings=[query_vector], n_results=k, where=combined
-        )
-        hits: list[SearchHit] = []
-        ids = res.get("ids", [[]])[0]
-        distances = res.get("distances", [[]])[0]
-        docs = res.get("documents", [[]])[0]
-        metas = res.get("metadatas", [[]])[0]
-        for i, id_ in enumerate(ids):
-            # Chroma returns cosine *distance*; convert to similarity in [0,1].
-            score = 1.0 - float(distances[i]) if distances else 0.0
-            hits.append(SearchHit(id=id_, score=score, content=docs[i], metadata=metas[i] or {}))
-        return hits
-
-    def delete(self, ids: Iterable[str], namespace: str) -> None:
-        ids = list(ids)
-        if not ids:
-            return
-        self._collection.delete(ids=ids, where={"namespace": {"$eq": namespace}})
-
-    def delete_namespace(self, namespace: str) -> None:
-        self._collection.delete(where={"namespace": {"$eq": namespace}})
-
-    def list_namespace(self, namespace: str) -> list[VectorItem]:
-        data = self._collection.get(
-            where={"namespace": {"$eq": namespace}},
-            include=["documents", "metadatas"],
-        )
-        ids = data.get("ids") or []
-        docs = data.get("documents") or []
-        metas = data.get("metadatas") or []
-        out: list[VectorItem] = []
-        for i, id_ in enumerate(ids):
-            meta = (metas[i] if i < len(metas) else None) or {}
-            content = docs[i] if i < len(docs) else ""
-            out.append(
-                VectorItem(
-                    id=id_,
-                    vector=[],
-                    content=content,
-                    metadata={k: v for k, v in meta.items() if k != "namespace"},
-                    namespace=namespace,
-                )
-            )
-        return out
-
-
 # ── Postgres + pgvector ───────────────────────────────────────────────────────
 
 
@@ -197,30 +112,52 @@ class PgVectorStore:
         self._table = table
         self._ensure_schema()
 
+    # Stable int key for pg_advisory_xact_lock so multiple workers serialise
+    # their schema creation. Value is arbitrary — chosen high to avoid
+    # colliding with any locks the app might take later.
+    _SCHEMA_LOCK_KEY = 8423742310
+
     def _ensure_schema(self) -> None:
         from sqlalchemy import text
+        from sqlalchemy.exc import IntegrityError, ProgrammingError
 
-        with self._engine.begin() as conn:
-            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-            conn.execute(
-                text(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS {self._table} (
-                        id        TEXT PRIMARY KEY,
-                        namespace TEXT NOT NULL,
-                        content   TEXT NOT NULL,
-                        metadata  JSONB NOT NULL DEFAULT '{{}}',
-                        embedding VECTOR({self._dim}) NOT NULL
+        try:
+            with self._engine.begin() as conn:
+                # Serialise concurrent CREATE TABLE IF NOT EXISTS across
+                # uvicorn workers / DO container restarts. Postgres's
+                # IF NOT EXISTS is not atomic against pg_type insertion, so
+                # parallel boots can collide on the unique constraint
+                # ``pg_type_typname_nsp_index`` for the table's rowtype.
+                conn.execute(
+                    text("SELECT pg_advisory_xact_lock(:k)"),
+                    {"k": self._SCHEMA_LOCK_KEY},
+                )
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS {self._table} (
+                            id        TEXT PRIMARY KEY,
+                            namespace TEXT NOT NULL,
+                            content   TEXT NOT NULL,
+                            metadata  JSONB NOT NULL DEFAULT '{{}}',
+                            embedding VECTOR({self._dim}) NOT NULL
+                        )
+                        """
                     )
-                    """
                 )
-            )
-            conn.execute(
-                text(
-                    f"CREATE INDEX IF NOT EXISTS {self._table}_ns_idx "
-                    f"ON {self._table} (namespace)"
+                conn.execute(
+                    text(
+                        f"CREATE INDEX IF NOT EXISTS {self._table}_ns_idx "
+                        f"ON {self._table} (namespace)"
+                    )
                 )
-            )
+        except (IntegrityError, ProgrammingError) as exc:
+            # The advisory lock should prevent this, but keep a soft fallback
+            # in case the lock can't be taken (e.g. a non-transactional
+            # connection pool). IF NOT EXISTS guarantees the end state, so
+            # the table being there is good enough.
+            log.warning("pgvector schema race tolerated: %s", exc)
 
     def upsert(self, items: Iterable[VectorItem]) -> None:
         from sqlalchemy import text
@@ -535,20 +472,13 @@ def make_vector_store(backend: str | None = None) -> VectorStore:
     ``backend`` overrides ``get_settings().vector_backend`` when given (used by
     tests to force an in-memory store).
     """
-    from src.config import (
-        CHROMA_COLLECTION,
-        CHROMA_DIR,
-        EMBEDDING_DIMENSIONS,
-        get_settings,
-    )
+    from src.config import EMBEDDING_DIMENSIONS, get_settings
 
     settings = get_settings()
     backend = backend or settings.vector_backend
 
     if backend == "memory":
         return InMemoryVectorStore()
-    if backend == "chroma":
-        return ChromaVectorStore(CHROMA_COLLECTION, str(CHROMA_DIR))
     if backend == "pgvector":
         return PgVectorStore(settings.database_url, dim=EMBEDDING_DIMENSIONS)
     if backend == "vectorize":

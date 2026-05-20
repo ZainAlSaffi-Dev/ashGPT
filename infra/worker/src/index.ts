@@ -137,7 +137,11 @@ export default {
 
     // Edge-only fast path: presigned PUT URL for direct R2 upload.
     if (url.pathname === '/uploads/presign' && req.method === 'POST') {
-      const body = await req.json<{ name: string; mime: string; doc_type?: string; week?: string | null }>();
+      // Clone before .json() — the original ``req`` is forwarded to the
+      // container further down and the underlying body stream can only be
+      // consumed once (otherwise: "Cannot reconstruct a Request with a used
+      // body").
+      const body = await req.clone().json<{ name: string; mime: string; doc_type?: string; week?: string | null }>();
       try {
         const { upload_url, blob_key } = await r2PresignPut(env, {
           name: body.name,
