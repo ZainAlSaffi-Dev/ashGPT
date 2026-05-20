@@ -55,8 +55,15 @@ def _get_vectorstore() -> Chroma:
 def _build_filter(
     week: str | None = None,
     doc_types: list[str] | None = None,
+    namespace: str | None = None,
 ) -> dict | None:
-    """Build a ChromaDB where-filter from optional week and type constraints."""
+    """Build a ChromaDB where-filter from optional week, type, and namespace constraints.
+
+    Namespace is the user's tenant id. When ``None`` no namespace filter is
+    applied (backwards-compat with the legacy shared collection used by the
+    coursework eval); when set, only chunks tagged with ``metadata.namespace``
+    matching are returned.
+    """
     conditions: list[dict] = []
 
     if week:
@@ -66,6 +73,9 @@ def _build_filter(
         conditions.append({"type": {"$eq": doc_types[0]}})
     elif doc_types and len(doc_types) > 1:
         conditions.append({"type": {"$in": doc_types}})
+
+    if namespace:
+        conditions.append({"namespace": {"$eq": namespace}})
 
     if not conditions:
         return None
@@ -143,6 +153,7 @@ def retrieve_texts(
     k: int = 6,
     strategy: str | None = None,
     use_reranker: bool | None = None,
+    namespace: str | None = None,
 ) -> list[RetrievedDocument]:
     """Retrieve text chunks (readings, tutorials, supplementary) from the KB.
 
@@ -154,10 +165,13 @@ def retrieve_texts(
         use_reranker: Override the global USE_RERANKER (eval ablation hook).
             When True, MMR fetches ``RERANKER_FETCH_K_TEXT`` candidates and a
             cross-encoder reduces them to ``k``.
+        namespace: User tenant id; when set, restricts to chunks tagged with
+            ``metadata.namespace`` matching. ``None`` searches all chunks
+            (legacy/shared collection).
     """
     store = _get_vectorstore()
-    doc_types = ["reading", "tutorial", "supplementary"]
-    where_filter = _build_filter(week=week, doc_types=doc_types)
+    doc_types = ["reading", "tutorial", "supplementary", "note"]
+    where_filter = _build_filter(week=week, doc_types=doc_types, namespace=namespace)
 
     rerank_on = USE_RERANKER if use_reranker is None else bool(use_reranker)
     fetch_k = RERANKER_FETCH_K_TEXT if rerank_on else k
@@ -180,6 +194,7 @@ def retrieve_slides(
     k: int = 4,
     strategy: str | None = None,
     use_reranker: bool | None = None,
+    namespace: str | None = None,
 ) -> list[RetrievedDocument]:
     """Retrieve lecture slide descriptions from the KB.
 
@@ -189,9 +204,12 @@ def retrieve_slides(
     Args:
         strategy: Override the global RETRIEVAL_STRATEGY for ablation.
         use_reranker: Override the global USE_RERANKER (eval ablation hook).
+        namespace: User tenant id (see ``retrieve_texts``).
     """
     store = _get_vectorstore()
-    where_filter = _build_filter(week=week, doc_types=["lecture_slide"])
+    where_filter = _build_filter(
+        week=week, doc_types=["lecture_slide", "slide"], namespace=namespace
+    )
 
     rerank_on = USE_RERANKER if use_reranker is None else bool(use_reranker)
     fetch_k = RERANKER_FETCH_K_SLIDES if rerank_on else k
@@ -214,8 +232,13 @@ def retrieve_all(
     k_text: int = 6,
     k_slides: int = 4,
     use_reranker: bool | None = None,
+    namespace: str | None = None,
 ) -> tuple[list[RetrievedDocument], list[RetrievedDocument]]:
     """Convenience wrapper that retrieves both text and slides in one call."""
-    texts = retrieve_texts(query, week=week, k=k_text, use_reranker=use_reranker)
-    slides = retrieve_slides(query, week=week, k=k_slides, use_reranker=use_reranker)
+    texts = retrieve_texts(
+        query, week=week, k=k_text, use_reranker=use_reranker, namespace=namespace
+    )
+    slides = retrieve_slides(
+        query, week=week, k=k_slides, use_reranker=use_reranker, namespace=namespace
+    )
     return texts, slides

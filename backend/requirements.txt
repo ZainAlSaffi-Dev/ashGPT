@@ -1,3 +1,4 @@
+# Agent pipeline
 langchain>=0.3.0
 langchain-community>=0.3.0
 langchain-openai>=0.3.0
@@ -5,13 +6,44 @@ langchain-chroma>=0.2.0
 langgraph>=0.4.0
 chromadb>=1.0.0
 google-genai>=1.70.0
+openai>=1.50.0
+
+# Ingestion
 pymupdf>=1.25.0
 Pillow>=11.0.0
-python-dotenv>=1.1.0
-streamlit>=1.45.0
-pytest>=8.0.0
-matplotlib>=3.9.0
-streamlit-mermaid>=0.3.0
-openai>=1.50.0
+python-docx>=1.1.0
+
+# Reranking (sentence-transformers/torch removed in Phase 5; replaced by Cohere API)
 sentence-transformers>=3.0.0
 torch>=2.12.0
+
+# API layer
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+sse-starlette>=2.1.0
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
+httpx>=0.27.0
+python-multipart>=0.0.12
+
+# Auth (Clerk JWT verification)
+pyjwt[crypto]>=2.9.0
+
+# Storage
+sqlalchemy>=2.0.30
+psycopg[binary]>=3.2.0
+alembic>=1.13.0
+aiosqlite>=0.20.0
+
+# AWS S3 SDK (R2 is S3-compatible)
+boto3>=1.35.0
+
+# Misc
+python-dotenv>=1.1.0
+streamlit>=1.45.0
+streamlit-mermaid>=0.3.0
+
+# Tests
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
+matplotlib>=3.9.0

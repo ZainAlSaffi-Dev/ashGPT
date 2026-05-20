@@ -163,16 +163,19 @@ def router_node(state: AgentState) -> dict:
 def retrieval_node(state: AgentState) -> dict:
     """Query ChromaDB for relevant text chunks and slide descriptions.
 
-    Reads:  query, week_filter, chat_history, use_reranker (optional override)
+    Reads:  query, week_filter, chat_history, user_id (tenant namespace),
+            use_reranker (optional override)
     Writes: retrieved_texts, retrieved_slides, node_trace
     """
     history = get_chat_history(state)
     search_q = build_retrieval_query(state["query"], history)
     week = state.get("week_filter")
+    namespace = state.get("user_id")
     use_reranker_override = state.get("use_reranker")
     log.info(
-        "RetrievalNode: searching KB (week=%s, follow_up=%s, rerank_override=%s)",
+        "RetrievalNode: searching KB (week=%s, ns=%s, follow_up=%s, rerank_override=%s)",
         week,
+        namespace,
         bool(history),
         use_reranker_override,
     )
@@ -183,6 +186,7 @@ def retrieval_node(state: AgentState) -> dict:
         k_text=8,
         k_slides=4,
         use_reranker=use_reranker_override,
+        namespace=namespace,
     )
 
     log.info(

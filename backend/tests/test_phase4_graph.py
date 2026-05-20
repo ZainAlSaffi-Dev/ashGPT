@@ -87,12 +87,16 @@ class TestEndToEndRouting:
     @pytest.mark.integration
     @pytest.mark.slow
     def test_ratio_path(self) -> None:
-        """Ratio intent should follow: router → retrieval → ratio_extractor → synthesis."""
+        """Ratio intent: router → retrieval → ratio_extractor → synthesis (→ verification)."""
         from src.agent.graph import run_query
+        from src.config import USE_VERIFICATION
 
         result = run_query("What is the ratio decidendi for adverse possession?", week_filter="week_3")
         assert result["intent"] == "ratio"
-        assert result["node_trace"] == ["router", "retrieval", "ratio_extractor", "synthesis"]
+        expected = ["router", "retrieval", "ratio_extractor", "synthesis"]
+        if USE_VERIFICATION:
+            expected.append("verification")
+        assert result["node_trace"] == expected
         assert result.get("ratio_decidendi"), "Should produce a ratio"
         assert result.get("irac_analysis"), "Should produce an IRAC analysis"
         assert result.get("final_answer"), "Should produce a final answer"
@@ -100,12 +104,16 @@ class TestEndToEndRouting:
     @pytest.mark.integration
     @pytest.mark.slow
     def test_chronology_path(self) -> None:
-        """Chronology intent should follow: router → retrieval → chronology → synthesis."""
+        """Chronology intent: router → retrieval → chronology → synthesis (→ verification)."""
         from src.agent.graph import run_query
+        from src.config import USE_VERIFICATION
 
         result = run_query("Show me the timeline of events for week 3 readings")
         assert result["intent"] == "chronology"
-        assert result["node_trace"] == ["router", "retrieval", "chronology", "synthesis"]
+        expected = ["router", "retrieval", "chronology", "synthesis"]
+        if USE_VERIFICATION:
+            expected.append("verification")
+        assert result["node_trace"] == expected
         assert result.get("mermaid_diagram"), "Should produce a Mermaid diagram"
         assert result.get("final_answer"), "Should produce a final answer"
 

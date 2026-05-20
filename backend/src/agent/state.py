@@ -43,6 +43,7 @@ class AgentState(TypedDict, total=False):
     query: str
     week_filter: str | None
     chat_history: list[ChatMessage]  # prior turns only; current message is ``query``
+    user_id: str | None  # tenant namespace; None ⇒ shared/legacy collection
 
     # ── Router output ──────────────────────────────────────────────────────
     intent: Literal["ratio", "chronology", "summary", "general"]

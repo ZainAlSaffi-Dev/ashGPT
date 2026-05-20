@@ -140,16 +140,21 @@ def run_query(
     query: str,
     week_filter: str | None = None,
     chat_history: list[dict[str, str]] | None = None,
+    user_id: str | None = None,
 ) -> AgentState:
     """Run a query through the full agent pipeline. Returns the final state.
 
     ``chat_history`` should contain **prior** turns only (each dict has ``role``
     and ``content``); the current user message must be passed only in ``query``.
+    ``user_id`` is the tenant namespace — when set, retrieval is restricted to
+    that user's chunks. Omit for legacy shared-collection behaviour (eval).
     """
     graph = get_graph()
     initial_state: AgentState = {"query": query}
     if week_filter:
         initial_state["week_filter"] = week_filter
+    if user_id:
+        initial_state["user_id"] = user_id
     prepared = prepare_chat_history_for_run(chat_history)
     if prepared:
         initial_state["chat_history"] = prepared
