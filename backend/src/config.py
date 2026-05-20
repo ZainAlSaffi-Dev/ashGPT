@@ -24,9 +24,9 @@ EMBEDDING_DIMENSIONS = 2560
 VLM_MODEL = "gemini-2.5-pro"                # Slide description during indexing
 
 ROUTER_MODEL = "gemini-3.1-flash-lite"                  # Lightweight: intent classification
-RATIO_EXTRACTOR_MODEL = "gpt-5.3-chat-latest"     # Mid-tier: IRAC extraction
+RATIO_EXTRACTOR_MODEL = "gpt-5.5"     # Mid-tier: IRAC extraction
 CHRONOLOGY_MODEL = "gemini-3-flash-preview"              # Lightweight: Mermaid generation
-SYNTHESIS_MODEL = "gpt-5.4-mini"                 # Strong: final grounded answer
+SYNTHESIS_MODEL = "gpt-5.5"                 # Strong: final grounded answer
 
 # ── Evaluation ─────────────────────────────────────────────────────────────────
 BASELINE_MODEL = "gpt-5.4-mini"             # Plain LLM baseline (no retrieval)
