@@ -468,7 +468,11 @@ def synthesis_node(state: AgentState) -> dict:
     )
 
     log.info("SynthesisNode: compiling final answer")
-    final_answer = llm_call(prompt, model=SYNTHESIS_MODEL, system_instruction=SYNTHESIS_SYSTEM)
+    # Phase 5: state may carry ``_override_synthesis_model`` when the
+    # confidence-gated escalation path re-invokes synthesis with a stronger
+    # model. Default to SYNTHESIS_MODEL otherwise.
+    model = state.get("_override_synthesis_model") or SYNTHESIS_MODEL
+    final_answer = llm_call(prompt, model=model, system_instruction=SYNTHESIS_SYSTEM)
 
     return {
         "final_answer": final_answer,
@@ -525,9 +529,22 @@ def verification_node(state: AgentState) -> dict:
     sources_text = _collect_sources_text(state)
     unsupported = find_unsupported_cases(answer, sources_text)
 
+    # Cheap confidence proxy: 1.0 when no unsupported claims, else fraction
+    # of total cited cases that were supported. Used by Phase 5 escalation.
+    from src.agent.verification import extract_case_citations
+
+    cited = extract_case_citations(answer)
+    total = len(cited) or 1
+    supported = max(0, total - len(unsupported))
+    confidence = supported / total
+
     report = {
         "unsupported_claims": unsupported,
         "rewrites_applied": False,
+        "claims_total": len(cited),
+        "claims_supported": supported,
+        "confidence_score": round(confidence, 3),
+        "all_supported": len(unsupported) == 0,
     }
 
     if not unsupported:

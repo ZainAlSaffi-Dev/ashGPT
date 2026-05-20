@@ -31,7 +31,15 @@ from src.agent.nodes import (
 )
 from src.agent.chat_memory import prepare_chat_history_for_run
 from src.agent.state import AgentState
-from src.config import USE_VERIFICATION
+from src.config import (
+    ANSWER_CACHE_TTL_DAYS,
+    ESCALATION_MODEL,
+    LOW_CONFIDENCE_THRESHOLD,
+    SYNTHESIS_MODEL,
+    USE_ANSWER_CACHE,
+    USE_CONFIDENCE_ESCALATION,
+    USE_VERIFICATION,
+)
 
 load_dotenv()
 
@@ -141,6 +149,9 @@ def run_query(
     week_filter: str | None = None,
     chat_history: list[dict[str, str]] | None = None,
     user_id: str | None = None,
+    *,
+    use_cache: bool | None = None,
+    use_escalation: bool | None = None,
 ) -> AgentState:
     """Run a query through the full agent pipeline. Returns the final state.
 
@@ -148,6 +159,18 @@ def run_query(
     and ``content``); the current user message must be passed only in ``query``.
     ``user_id`` is the tenant namespace — when set, retrieval is restricted to
     that user's chunks. Omit for legacy shared-collection behaviour (eval).
+
+    Phase 5 hardening (controlled by ``use_cache`` / ``use_escalation`` —
+    default to the config flags):
+
+    * **Semantic cache** — after the first run we hash (user_id, normalised
+      query, sorted retrieved chunk ids). On a hit we replay the cached
+      answer + sources without re-invoking the LLM. Follow-ups (chat_history)
+      bypass the cache to keep multi-turn reasoning faithful.
+    * **Confidence-gated escalation** — when verification's
+      ``confidence_score`` falls below ``LOW_CONFIDENCE_THRESHOLD``, we
+      re-synthesize once with ``ESCALATION_MODEL`` against the same context.
+      Records ``escalated_from`` in the result.
     """
     graph = get_graph()
     initial_state: AgentState = {"query": query}
@@ -160,4 +183,89 @@ def run_query(
         initial_state["chat_history"] = prepared
 
     result = graph.invoke(initial_state)
+
+    cache_on = USE_ANSWER_CACHE if use_cache is None else use_cache
+    escalate_on = USE_CONFIDENCE_ESCALATION if use_escalation is None else use_escalation
+
+    if escalate_on and user_id and not prepared:
+        result = _maybe_escalate(result)
+
+    if cache_on and user_id and not prepared:
+        # Fire-and-forget cache write. Failures don't affect the response.
+        try:
+            import asyncio
+
+            asyncio.run(_cache_write_safe(result, query, user_id))
+        except Exception as e:  # pragma: no cover
+            log.warning("cache write failed: %s", e)
+
     return result
+
+
+def _chunk_ids_from(result: AgentState) -> list[str]:
+    """Pull stable identifiers off retrieved docs for cache keying."""
+    ids: list[str] = []
+    for d in (result.get("retrieved_texts") or []) + (result.get("retrieved_slides") or []):
+        ids.append(d.get("source") or d.get("content", "")[:80])
+    return ids
+
+
+def _maybe_escalate(result: AgentState) -> AgentState:
+    """Re-synthesize with the stronger model when confidence is low."""
+    report = result.get("verification_report") or {}
+    confidence = float(report.get("confidence_score", 1.0))
+    if confidence >= LOW_CONFIDENCE_THRESHOLD:
+        return result
+    log.info(
+        "escalation: confidence=%.2f < %.2f, retrying with %s",
+        confidence,
+        LOW_CONFIDENCE_THRESHOLD,
+        ESCALATION_MODEL,
+    )
+    # Re-call synthesis_node with override model via temporary state field.
+    from src.agent.nodes import synthesis_node
+
+    escalated_state = {**result, "_override_synthesis_model": ESCALATION_MODEL}
+    try:
+        delta = synthesis_node(escalated_state)
+    except Exception as e:  # pragma: no cover
+        log.warning("escalation synthesis failed (%s); keeping original answer", e)
+        return result
+    new_answer = (delta or {}).get("final_answer")
+    if not new_answer:
+        return result
+    out = dict(result)
+    out["final_answer"] = new_answer
+    out["escalated_from"] = SYNTHESIS_MODEL
+    out["escalated_to"] = ESCALATION_MODEL
+    return out
+
+
+async def _cache_write_safe(result: AgentState, query: str, user_id: str) -> None:
+    from datetime import timedelta
+
+    from src.agent.cache import make_cache_key, put
+
+    chunk_ids = _chunk_ids_from(result)
+    cache_key = make_cache_key(user_id, query, chunk_ids)
+    payload = {
+        "intent": result.get("intent"),
+        "sources": [
+            {
+                "source": d.get("source"),
+                "doc_type": d.get("doc_type"),
+                "week": d.get("week"),
+                "snippet": (d.get("content") or "")[:280],
+            }
+            for d in (result.get("retrieved_texts") or [])
+            + (result.get("retrieved_slides") or [])
+        ],
+        "verification_report": result.get("verification_report"),
+    }
+    await put(
+        cache_key=cache_key,
+        user_id=user_id,
+        answer=result.get("final_answer", ""),
+        payload=payload,
+        ttl=timedelta(days=ANSWER_CACHE_TTL_DAYS),
+    )

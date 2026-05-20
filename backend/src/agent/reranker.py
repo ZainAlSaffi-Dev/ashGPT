@@ -1,36 +1,60 @@
-"""Cross-encoder reranker for retrieved documents.
+"""Rerankers for retrieved documents.
 
-The retrieval node uses MMR for diversity. MMR optimises for marginal
-relevance, not raw query-document similarity, so the resulting top-k can
-include chunks that are diverse but only weakly related to the question.
+Two backends share one ``Reranker`` interface:
 
-This module wraps a small pretrained cross encoder (``ms-marco-MiniLM-L-6-v2``)
-that re-scores each (query, chunk) pair and returns the top-k by score.
-The model is loaded lazily and cached as a module-level singleton — the
-first call pays the load cost (~80 MB download on first run); subsequent
-calls reuse the cached instance.
+  * ``CohereReranker``        — Cohere Rerank v3 / v3.5 REST API. Default in
+                                prod (better quality than the local cross-
+                                encoder, no torch in the container). Set
+                                ``COHERE_API_KEY`` to enable.
+  * ``CrossEncoderReranker``  — local ``ms-marco-MiniLM-L-6-v2`` via
+                                sentence-transformers (fallback / offline).
+
+The hybrid retrieval (Phase 1.5) supplies a fused candidate pool; this stage
+re-scores against the query and keeps the top-k. With BM25+dense+rerank we
+get the most precise top results the eval suite has seen.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Optional, Protocol
 
 from src.agent.state import RetrievedDocument
-from src.config import RERANKER_MODEL
+from src.config import RERANKER_MODEL, get_settings
 
 log = logging.getLogger(__name__)
 
 
-_singleton: Optional["CrossEncoderReranker"] = None
+class Reranker(Protocol):
+    def rerank(
+        self,
+        query: str,
+        documents: list[RetrievedDocument],
+        top_k: int,
+    ) -> list[RetrievedDocument]: ...
 
 
-def get_reranker() -> "CrossEncoderReranker":
-    """Return the module-level cached reranker instance (lazy init)."""
+_singleton: Optional["Reranker"] = None
+
+
+def get_reranker() -> Reranker:
+    """Return the configured singleton reranker (Cohere if key set, else local)."""
     global _singleton
     if _singleton is None:
-        _singleton = CrossEncoderReranker(model_name=RERANKER_MODEL)
+        s = get_settings()
+        if s.cohere_api_key:
+            _singleton = CohereReranker(api_key=s.cohere_api_key, model=s.cohere_rerank_model)
+            log.info("Reranker: Cohere %s", s.cohere_rerank_model)
+        else:
+            _singleton = CrossEncoderReranker(model_name=RERANKER_MODEL)
+            log.info("Reranker: local %s", RERANKER_MODEL)
     return _singleton
+
+
+def reset_reranker() -> None:
+    """Drop the cached reranker — used by tests when toggling backends."""
+    global _singleton
+    _singleton = None
 
 
 class CrossEncoderReranker:
@@ -94,3 +118,42 @@ class CrossEncoderReranker:
         scored.sort(key=lambda x: float(x[1]), reverse=True)
 
         return [doc for doc, _ in scored[:top_k]]
+
+
+class CohereReranker:
+    """Cohere Rerank API. https://docs.cohere.com/reference/rerank"""
+
+    def __init__(self, api_key: str, model: str = "rerank-v3.5"):
+        import cohere
+
+        # v6 SDK exposes ClientV2; legacy Client still works but emits a
+        # deprecation. Stick with v2 for forward-compat.
+        self._client = cohere.ClientV2(api_key=api_key)
+        self._model = model
+
+    def rerank(
+        self,
+        query: str,
+        documents: list[RetrievedDocument],
+        top_k: int,
+    ) -> list[RetrievedDocument]:
+        if not documents or top_k <= 0:
+            return []
+        passages = [d.get("content", "") for d in documents]
+        try:
+            res = self._client.rerank(
+                model=self._model,
+                query=query,
+                documents=passages,
+                top_n=min(top_k, len(passages)),
+            )
+        except Exception as e:  # pragma: no cover
+            log.warning("Cohere rerank failed (%s); returning original order", e)
+            return documents[:top_k]
+        out: list[RetrievedDocument] = []
+        for item in res.results:
+            idx = getattr(item, "index", None)
+            if idx is None or idx >= len(documents):
+                continue
+            out.append(documents[idx])
+        return out[:top_k]

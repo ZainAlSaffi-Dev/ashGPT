@@ -72,6 +72,20 @@ RERANKER_FETCH_K_SLIDES = 8    # MMR returns 8 slide chunks  → rerank to 4
 # ── Verification node (fact-check cited cases against retrieved sources) ──────
 USE_VERIFICATION = True
 
+# ── Confidence-gated escalation (Phase 5) ─────────────────────────────────────
+# After verification, compute a confidence score in [0,1] from the claim
+# support rate. If it falls below LOW_CONFIDENCE_THRESHOLD and the request was
+# served by the cheaper SYNTHESIS_MODEL, automatically re-run synthesis with
+# ESCALATION_MODEL (stronger). Burns one extra paid call only when needed.
+USE_CONFIDENCE_ESCALATION = True
+LOW_CONFIDENCE_THRESHOLD = 0.7
+ESCALATION_MODEL = "gpt-5.4"  # Stronger than the default mini synthesis
+
+# ── Semantic answer cache (Phase 5) ───────────────────────────────────────────
+# Cache (user_id, normalised query, sorted chunk-id set) → final answer for 7d.
+USE_ANSWER_CACHE = True
+ANSWER_CACHE_TTL_DAYS = 7
+
 # ── Multi-turn chat (Streamlit session → AgentState.chat_history) ─────────────
 CHAT_HISTORY_MAX_MESSAGES = 24
 CHAT_HISTORY_MAX_CHARS_PER_MESSAGE = 3500
