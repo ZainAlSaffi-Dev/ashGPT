@@ -26,6 +26,7 @@ from src.config import get_settings
 from src.storage.db import get_engine, init_db
 
 from .routes_chat import router as chat_router
+from .routes_exam import router as exam_router
 from .routes_files import router as files_router
 from .routes_sessions import router as sessions_router
 
@@ -63,3 +64,4 @@ def health() -> dict:
 app.include_router(chat_router)
 app.include_router(sessions_router)
 app.include_router(files_router)
+app.include_router(exam_router)
