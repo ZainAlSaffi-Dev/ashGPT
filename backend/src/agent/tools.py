@@ -56,12 +56,28 @@ log = logging.getLogger(__name__)
 # ── Singleton vector store ─────────────────────────────────────────────────────
 
 _vectorstore: Chroma | None = None
+_vectorstore_missing_logged: bool = False
 
 
-def _get_vectorstore() -> Chroma:
-    """Lazily initialise and cache the ChromaDB vector store."""
-    global _vectorstore
+def _get_vectorstore() -> Chroma | None:
+    """Lazily initialise and cache the ChromaDB vector store.
+
+    Returns ``None`` when ``CHROMA_DIR`` does not exist (the prod
+    container ships without a baked Chroma DB — retrieval should switch
+    to the storage factory + pgvector once that path is wired). Callers
+    must check for ``None`` and skip the retrieval leg.
+    """
+    global _vectorstore, _vectorstore_missing_logged
     if _vectorstore is None:
+        if not CHROMA_DIR.exists():
+            if not _vectorstore_missing_logged:
+                log.warning(
+                    "CHROMA_DIR %s missing — retrieval disabled. Switch to "
+                    "pgvector via src.storage.vector_store in this env.",
+                    CHROMA_DIR,
+                )
+                _vectorstore_missing_logged = True
+            return None
         persistent_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
         _vectorstore = Chroma(
             client=persistent_client,
@@ -130,6 +146,8 @@ _bm25_initialised = False
 
 def _bm25_source(namespace: str | None) -> list[tuple[str, str, dict]]:
     """Pull all chunks for ``namespace`` from Chroma → BM25 corpus rows."""
+    if not CHROMA_DIR.exists():
+        return []
     persistent_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
     collection = persistent_client.get_or_create_collection(CHROMA_COLLECTION)
     where = {"namespace": {"$eq": namespace}} if namespace else None
@@ -208,6 +226,11 @@ def _hybrid_search(
 
     # Dense leg (MMR over a larger pool — RRF benefits from candidate breadth).
     store = _get_vectorstore()
+    if store is None:
+        if timings is not None:
+            timings["dense_ms"] = 0.0
+            timings["bm25_ms"] = 0.0
+        return []
     t0 = time.perf_counter()
     dense_results = store.max_marginal_relevance_search(
         query,
@@ -399,7 +422,10 @@ def retrieve_texts(
     else:
         t_d = time.perf_counter()
         store = _get_vectorstore()
-        results = _search(store, query, k=fetch_k, where_filter=where_filter, strategy=strategy)
+        if store is None:
+            results: list = []
+        else:
+            results = _search(store, query, k=fetch_k, where_filter=where_filter, strategy=strategy)
         leg_timings["dense_ms"] = round((time.perf_counter() - t_d) * 1000, 1)
         log.info(
             "retrieve_texts [%s, rerank=%s]: %d candidates (week=%s)",
@@ -465,7 +491,10 @@ def retrieve_slides(
     else:
         t_d = time.perf_counter()
         store = _get_vectorstore()
-        results = _search(store, query, k=fetch_k, where_filter=where_filter, strategy=strategy)
+        if store is None:
+            results: list = []
+        else:
+            results = _search(store, query, k=fetch_k, where_filter=where_filter, strategy=strategy)
         leg_timings["dense_ms"] = round((time.perf_counter() - t_d) * 1000, 1)
         log.info(
             "retrieve_slides [%s, rerank=%s]: %d candidates (week=%s)",
