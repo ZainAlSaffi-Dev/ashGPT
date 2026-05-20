@@ -9,6 +9,7 @@
 import { createParser } from 'eventsource-parser';
 
 import type { ChatStreamEvents, Intent, SourceHit, VerificationReport } from './types';
+import { resolveApiBase } from './api';
 
 export interface ChatStreamHandlers {
   onNode?: (name: string) => void;
@@ -44,7 +45,7 @@ export async function streamChat(
     typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_DEV_USER : undefined;
   if (devUser && !opts?.token) headers.set('X-Dev-User', devUser);
 
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE || '/api';
+  const apiBase = resolveApiBase();
   const res = await fetch(`${apiBase}/chat`, {
     method: 'POST',
     body: JSON.stringify(body),

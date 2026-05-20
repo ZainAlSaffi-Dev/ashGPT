@@ -18,7 +18,20 @@ import type {
   SessionSummary,
 } from './types';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/api';
+// Resolve the API base URL with a runtime fallback. Build-time env vars
+// (process.env.NEXT_PUBLIC_API_BASE) haven't been reliably plumbed through
+// the Pages build pipeline, so we also detect the hosted domain and route
+// directly to the edge Worker when we're on it.
+export function resolveApiBase(): string {
+  const buildBase = process.env.NEXT_PUBLIC_API_BASE;
+  if (buildBase) return buildBase;
+  if (typeof window !== 'undefined' && window.location.hostname.endsWith('pages.dev')) {
+    return 'https://lawgpt-edge.hypersonic3692.workers.dev';
+  }
+  return '/api';
+}
+
+const API_BASE = resolveApiBase();
 
 export class ApiError extends Error {
   constructor(public status: number, public body: string) {
