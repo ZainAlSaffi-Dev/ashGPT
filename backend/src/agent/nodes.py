@@ -1,9 +1,9 @@
-"""Cognitive nodes for the Property Law LangGraph pipeline.
+"""Cognitive nodes for the LangGraph legal-study pipeline.
 
 Each node is a pure function: AgentState → partial AgentState update.
-Nodes are composed into a graph in Phase 4 (graph.py).
+Nodes are composed into a graph in graph.py.
 
-Node pipeline:
+Pipeline:
     router_node → retrieval_node → [ratio_extractor_node | chronology_node] → synthesis_node
 """
 
@@ -26,7 +26,6 @@ from src.agent.state import AgentState
 from src.agent.tools import retrieve_all
 from src.agent.verification import find_unsupported_cases
 from src.config import (
-    ABLATION_MODEL,
     CHRONOLOGY_MODEL,
     RATIO_EXTRACTOR_MODEL,
     ROUTER_MODEL,
@@ -80,26 +79,32 @@ def _timed(name: str):
 
 
 def _format_context(state: AgentState) -> str:
-    """Compile retrieved texts and slides into a single context block."""
+    """Compile retrieved text and image-bearing chunks into a single context block."""
     sections: list[str] = []
+
+    def _tags(doc: dict) -> str:
+        bits = []
+        if doc.get("doc_type"):
+            bits.append(doc["doc_type"])
+        if doc.get("week"):
+            bits.append(doc["week"])
+        return f" [{', '.join(bits)}]" if bits else ""
 
     texts = state.get("retrieved_texts", [])
     if texts:
         sections.append("=== RETRIEVED TEXT SOURCES ===")
         for i, doc in enumerate(texts, 1):
             sections.append(
-                f"\n--- Source {i}: {doc['source']} "
-                f"[{doc['week']}, {doc['doc_type']}] ---\n"
+                f"\n--- Source {i}: {doc['source']}{_tags(doc)} ---\n"
                 f"{doc['content']}"
             )
 
     slides = state.get("retrieved_slides", [])
     if slides:
-        sections.append("\n=== RETRIEVED LECTURE SLIDES ===")
+        sections.append("\n=== RETRIEVED IMAGES / DIAGRAMS ===")
         for i, doc in enumerate(slides, 1):
             sections.append(
-                f"\n--- Slide {i}: {doc['source']} "
-                f"[{doc['week']}] ---\n"
+                f"\n--- Image {i}: {doc['source']}{_tags(doc)} ---\n"
                 f"{doc['content']}"
             )
 
@@ -120,26 +125,30 @@ def _retrieved_chunk_ids(state: AgentState) -> list[str]:
 
 
 ROUTER_SYSTEM = (
-    "You are a query classifier for a Property Law study assistant. "
-    "You may receive a prior conversation plus a LATEST student message. "
-    "Classify **only** the latest message, but use the transcript to resolve "
-    "vague references (e.g. \"that case\", \"the diagram\", \"explain further\").\n\n"
+    "You are a query classifier for a legal study assistant. The student is "
+    "studying any area of law (their own uploaded corpus — cases, statutes, "
+    "notes, lecture material). You may receive a prior conversation plus a "
+    "LATEST student message. Classify **only** the latest message, but use "
+    "the transcript to resolve vague references (e.g. \"that case\", \"the "
+    "diagram\", \"explain further\").\n\n"
     "Return ONLY a JSON object with two keys:\n"
     '  "intent": one of "ratio", "chronology", "summary", "general"\n'
-    '  "week_filter": a string like "week_3" if the user mentions a specific '
-    "week, or null if not.\n\n"
+    '  "week_filter": a string like "week_3" if the student explicitly '
+    'references a labelled week, topic block, or module in their own corpus; '
+    'null otherwise. Do not invent a week.\n\n'
     "Intent definitions:\n"
     '- "ratio": user wants the ratio decidendi, binding legal rule, or IRAC analysis of a case.\n'
     '- "chronology": user ONLY wants a visual timeline, flowchart, diagram, chain of title, '
     'sequence of events, chain of events, "who did what", "what happened and when", or '
     '"walk me through the events" — with NO request for a broader explanation or summary.\n'
-    '- "summary": use this when the user wants (a) a general case explanation OR topic overview, '
+    '- "summary": use this when the user wants (a) a general case or topic explanation '
     'OR (b) asks for BOTH a sequence/timeline AND a broader explanation or summary. '
     'Examples that must map to "summary": "explain X and give me the sequence of events", '
     '"who was doing what and provide a summary", "walk me through the case". '
     'This intent runs both the chronology diagram AND the IRAC analysis, so it is the '
     'correct choice whenever the query combines a timeline request with any explanatory goal.\n'
-    '- "general": anything else (greetings, meta-questions, off-topic).\n\n'
+    '- "general": anything else (greetings, meta-questions, off-topic, definitional, '
+    'doctrinal explanations not tied to a single case).\n\n'
     "DECISION RULE: If the query contains timeline/sequence language (e.g. \"sequence of "
     "events\", \"who did what\", \"chain of events\", \"what happened\", \"walk me through\") "
     "alongside any request for explanation, summary, or overview — classify as \"summary\", "
@@ -313,9 +322,12 @@ def cache_check_node(state: AgentState) -> dict:
 
 
 RATIO_SYSTEM = (
-    "You are an expert Australian Property Law tutor. Your task is to analyse "
-    "the provided source material and extract the ratio decidendi — the binding "
-    "legal principle that the court applied to reach its decision.\n\n"
+    "You are an expert legal tutor working across any area of law (the "
+    "student's own uploaded corpus). Analyse the provided source material and "
+    "extract the ratio decidendi — the binding legal principle the court "
+    "applied to reach its decision. Stay neutral on jurisdiction: follow "
+    "whatever the sources indicate (Australian, English, US, EU, comparative, "
+    "etc.).\n\n"
     "You MUST structure your response as an IRAC analysis:\n"
     "1. **Issue**: State the legal question the court had to decide.\n"
     "2. **Rule**: State the legal rule or principle (this IS the ratio decidendi).\n"
@@ -386,35 +398,36 @@ def ratio_extractor_node(state: AgentState) -> dict:
 
 
 CHRONOLOGY_SYSTEM = (
-    "You are an expert Australian Property Law tutor specialising in creating "
-    "precise chronological flowcharts of property transactions and legal events.\n\n"
+    "You are an expert legal tutor specialising in turning case facts, "
+    "statutory histories, or procedural records into precise chronological "
+    "flowcharts. The student's corpus may cover any area of law.\n\n"
     "Your task:\n"
     "1. Extract the chronological sequence of events from the source material.\n"
     "2. Output a valid Mermaid.js flowchart using `graph TD` syntax.\n"
     "3. After the Mermaid block, provide a brief plain-English summary of the timeline.\n\n"
     "STRICT Mermaid formatting rules for readability:\n"
     "- Use `graph TD` (top-down) direction.\n"
-    "- Node IDs must be camelCase (no spaces): e.g. `ownerDies`, `titlePasses`.\n"
+    "- Node IDs must be camelCase (no spaces): e.g. `claimFiled`, `appealHeard`.\n"
     "- KEEP NODE LABELS SHORT — maximum 8-10 words per node. Put dates at the start.\n"
-    "  GOOD: `e1[\"1881: Clissold enters possession\"]`\n"
-    "  BAD:  `e1[\"1881: Frederick Clissold enters into possession of the land and begins to enclose it\"]`\n"
+    "  GOOD: `e1[\"2019-03: claim filed\"]`\n"
+    "  BAD:  `e1[\"On 14 March 2019 the plaintiff filed a statement of claim against the defendant…\"]`\n"
     "- Put extra detail on the EDGE labels, not the nodes:\n"
-    "  GOOD: `e1 -->|\"encloses land, pays rates\"| e2`\n"
-    "- Use round brackets for decision nodes: `d1{\"Owner consents?\"}`\n"
-    "- Use subgraphs to group related phases: `subgraph phase1 [\"Phase 1: Possession\"]`\n"
+    "  GOOD: `e1 -->|\"plaintiff serves statement of claim\"| e2`\n"
+    "- Use curly brackets for decision nodes: `d1{\"Defence served?\"}`\n"
+    "- Use subgraphs to group related phases: `subgraph phase1 [\"Pleadings\"]`\n"
     "- Wrap ALL labels in double quotes.\n"
     "- Do NOT use the keyword `end` as a node ID.\n"
     "- Aim for 5-12 nodes total. Fewer is better — each node is one key event.\n\n"
     "Example of a GOOD diagram:\n"
     "```\n"
     "graph TD\n"
-    "    subgraph possession [\"Establishing Possession\"]\n"
-    "        e1[\"1881: Clissold takes possession\"] -->|\"encloses land, pays rates\"| e2[\"1881-1891: Continuous occupation\"]\n"
+    "    subgraph pleadings [\"Pleadings\"]\n"
+    "        e1[\"2019-03: claim filed\"] -->|\"plaintiff serves statement of claim\"| e2[\"2019-05: defence filed\"]\n"
     "    end\n"
-    "    subgraph limitation [\"Limitation Period\"]\n"
-    "        e2 -->|\"12 years pass\"| e3[\"1893: Limitation period expires\"]\n"
+    "    subgraph trial [\"Trial\"]\n"
+    "        e2 -->|\"matter heard at first instance\"| e3[\"2020-08: trial judgment\"]\n"
     "    end\n"
-    "    e3 -->|\"owner's title extinguished\"| e4[\"Title vests in possessor\"]\n"
+    "    e3 -->|\"appeal lodged within time\"| e4[\"2021-02: appeal decided\"]\n"
     "```\n\n"
     "Format your full response as:\n"
     "```mermaid\n<your flowchart>\n```\n\n"
@@ -480,11 +493,12 @@ def chronology_node(state: AgentState) -> dict:
 
 
 SYNTHESIS_SYSTEM = (
-    "You are an expert Australian Property Law tutor providing a final answer "
-    "to a student's question.\n\n"
+    "You are an expert legal tutor providing a final answer to a student's "
+    "question. The student may be studying any area of law (their own "
+    "uploaded corpus — cases, statutes, notes, slides, transcripts).\n\n"
     "You will be given:\n"
     "- The student's original question.\n"
-    "- Retrieved source material from readings and lecture slides.\n"
+    "- Retrieved source material from their corpus (any document type).\n"
     "- Optionally, an IRAC analysis with the ratio decidendi.\n"
     "- Optionally, a Mermaid.js chronological flowchart and timeline summary.\n\n"
     "GROUNDING RULES:\n"
@@ -495,10 +509,10 @@ SYNTHESIS_SYSTEM = (
     "- EXPLANATIONS are encouraged: paraphrase, simplify, and connect ideas "
     "in plain English to help the student understand. You are a tutor, not "
     "a copy machine.\n"
-    "- Use inline citations where you rely on specific sources, e.g. "
-    "(Source: Readings Week 3) or (Source: Lecture 2 Slide 5).\n"
+    "- Use inline citations where you rely on specific sources, formatted as "
+    "(Source: <filename or short reference from the chunk header>).\n"
     "- If the sources are insufficient, say: \"The provided sources do not "
-    "cover [topic] in detail. Please consult your additional readings.\"\n"
+    "cover [topic] in detail. Please upload or consult further material.\"\n"
     "- If CONVERSATION HISTORY is provided, continue the same study session: resolve "
     "pronouns and short follow-ups using the transcript, but every **new** factual "
     "claim about cases or law must still appear in the PRIMARY EVIDENCE (or "
@@ -595,14 +609,14 @@ def synthesis_node(state: AgentState) -> dict:
 
 
 VERIFICATION_REWRITE_SYSTEM = (
-    "You are a careful Property Law editor. You will be given:\n"
+    "You are a careful legal editor. You will be given:\n"
     "1. The student's question.\n"
-    "2. The retrieved source material.\n"
+    "2. The retrieved source material from the student's corpus.\n"
     "3. A draft answer.\n"
     "4. A list of CASE CITATIONS in the draft that DO NOT appear in the sources.\n\n"
     "Your task: rewrite the draft answer so that EACH unsupported citation is "
     "either (a) removed entirely, or (b) hedged with a phrase that signals it is "
-    "not in the provided materials (e.g. \"is not covered in the indexed "
+    "not in the provided materials (e.g. \"is not covered in the uploaded "
     "sources\"). Preserve every supported claim, the structure of the answer, "
     "every Markdown heading, and any ```mermaid code block VERBATIM. Do not "
     "introduce new citations. Do not mention this rewrite process to the "
@@ -702,130 +716,3 @@ def verification_node(state: AgentState) -> dict:
     }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ABLATION: MEGA-PROMPT (single LLM call — no multi-node graph)
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-MEGA_PROMPT_SYSTEM = (
-    "You are an expert Australian Property Law tutor. You will be given a student "
-    "question and retrieved source material. Produce a response with the sections below.\n\n"
-    # ── Section 1: IRAC ──────────────────────────────────────────────────────
-    "## SECTION 1 — IRAC ANALYSIS\n"
-    "Provide a full IRAC analysis structured with these exact headings:\n"
-    "- **Issue**: The legal question the court had to decide.\n"
-    "- **Rule**: The ratio decidendi — the binding legal principle.\n"
-    "- **Application**: How the court applied the rule to the facts.\n"
-    "- **Conclusion**: The court's decision.\n\n"
-    "Start this section with a one-sentence statement of the ratio decidendi on its own "
-    "line prefixed with 'Ratio Decidendi:'\n\n"
-    # ── Section 2: Mermaid diagram (conditional) ─────────────────────────────
-    "## SECTION 2 — CHRONOLOGICAL FLOWCHART (conditional)\n"
-    "Evaluate the student's query. If the query asks for a timeline, "
-    "sequence of events, chain of events, flowchart, 'who did what', or 'what happened',"
-    "output a valid Mermaid.js `graph TD` diagram here.\n\n"
-    "When a diagram is required, follow these formatting rules:\n"
-    "- Use `graph TD` (top-down) direction.\n"
-    "- Node IDs must be camelCase (no spaces): e.g. `ownerDies`, `titlePasses`.\n"
-    "- Keep node labels SHORT — maximum 8-10 words. Put dates at the start.\n"
-    "  GOOD: `e1[\"1881: Clissold enters possession\"]`\n"
-    "  BAD:  `e1[\"1881: Frederick Clissold enters into possession of the land\"]`\n"
-    "- Put extra detail on edge labels: `e1 -->|\"encloses land, pays rates\"| e2`\n"
-    "- Use curly brackets for decision nodes: `d1{\"Owner consents?\"}`\n"
-    "- Use subgraphs to group related phases.\n"
-    "- Wrap ALL labels in double quotes.\n"
-    "- Do NOT use the keyword `end` as a node ID.\n"
-    "- Aim for 5-12 nodes total.\n\n"
-    "Format a diagram as:\n"
-    "```mermaid\n<your flowchart>\n```\n\n"
-    # ── Section 3: Summary ───────────────────────────────────────────────────
-    "## SECTION 3 — PLAIN-ENGLISH SUMMARY\n"
-    "Provide a concise plain-English explanation that answers the student's question "
-    "directly, drawing on the IRAC analysis and any diagram above. Use inline citations "
-    "where you rely on specific sources, e.g. (Source: Readings Week 3). Structure "
-    "your answer with headings and paragraphs.\n\n"
-    # ── Grounding rules ──────────────────────────────────────────────────────
-    "GROUNDING RULES (apply to all sections):\n"
-    "- ALL case names, dates, statutory references, legal tests, and holdings MUST "
-    "appear in the provided source material. Do NOT invent facts.\n"
-    "- Explanations and paraphrasing are encouraged — you are a tutor.\n"
-    "- If sources are insufficient, say so explicitly rather than filling gaps.\n"
-    "- If CONVERSATION HISTORY is provided, use it only to resolve pronouns and "
-    "follow-up references; all legal facts must still come from the sources."
-)
-
-
-@_timed("mega_prompt")
-def mega_prompt_node(state: AgentState) -> dict:
-    """Single-LLM ablation: retrieval context → one call produces IRAC + Mermaid + summary.
-
-    Bypasses the router and all specialised reasoning nodes. Used to measure
-    whether the multi-node LangGraph architecture adds value over a single
-    consolidated prompt.
-
-    Reads:  query, retrieved_texts, retrieved_slides, chat_history
-    Writes: ratio_decidendi, irac_analysis, mermaid_diagram, chronology_summary,
-            final_answer, node_trace
-    """
-    query = state["query"]
-    context = _format_context(state)
-    history = get_chat_history(state)
-    hist_block = (
-        f"CONVERSATION HISTORY:\n{format_transcript_for_llm(history)}\n\n"
-        if history
-        else ""
-    )
-
-    prompt = (
-        f"{hist_block}"
-        f"STUDENT QUESTION: {query}\n\n"
-        f"SOURCE MATERIAL:\n{context}\n\n"
-        "Using only the source material above, produce all three sections as instructed."
-    )
-
-    log.info("MegaPromptNode: single consolidated LLM call (ablation)")
-    response = llm_call(prompt, model=ABLATION_MODEL, system_instruction=MEGA_PROMPT_SYSTEM)
-
-    # ── Parse ratio decidendi ─────────────────────────────────────────────────
-    ratio_line = ""
-    for line in response.split("\n"):
-        if line.strip().lower().startswith("ratio decidendi:"):
-            ratio_line = line.split(":", 1)[-1].strip().lstrip("#*- ")
-            break
-    if not ratio_line:
-        for line in response.split("\n"):
-            if "ratio" in line.lower() and "decidendi" in line.lower():
-                ratio_line = line.strip().lstrip("#*- ")
-                break
-
-    # ── Parse IRAC block (Section 1) ─────────────────────────────────────────
-    irac_match = re.search(
-        r"(?:##\s*SECTION\s*1[^\n]*\n)(.*?)(?=##\s*SECTION\s*2|```mermaid|\Z)",
-        response,
-        re.DOTALL | re.IGNORECASE,
-    )
-    irac_analysis = irac_match.group(1).strip() if irac_match else ""
-
-    # ── Parse Mermaid block (Section 2) ──────────────────────────────────────
-    mermaid_match = re.search(r"```mermaid\s*\n(.*?)```", response, re.DOTALL)
-    mermaid_diagram = mermaid_match.group(1).strip() if mermaid_match else ""
-    if not mermaid_diagram:
-        log.warning("MegaPromptNode: no Mermaid block found in response")
-
-    # ── Parse plain-English summary (Section 3) ───────────────────────────────
-    summary_match = re.search(
-        r"(?:##\s*SECTION\s*3[^\n]*\n)(.*)",
-        response,
-        re.DOTALL | re.IGNORECASE,
-    )
-    chronology_summary = summary_match.group(1).strip() if summary_match else ""
-
-    # final_answer = full response (UI can render any embedded mermaid block)
-    return {
-        "ratio_decidendi": ratio_line,
-        "irac_analysis": irac_analysis,
-        "mermaid_diagram": mermaid_diagram,
-        "chronology_summary": chronology_summary,
-        "final_answer": response,
-        "node_trace": _append_trace(state, "mega_prompt"),
-    }

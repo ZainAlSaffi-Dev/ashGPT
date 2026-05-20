@@ -59,7 +59,7 @@ class GeneratedExam(BaseModel):
 # ── Prompt template ───────────────────────────────────────────────────────────
 
 
-_EXAM_PROMPT = """You are a senior law tutor writing a practice exam for a property-law student.
+_EXAM_PROMPT = """You are a senior law tutor writing a practice exam grounded in the student's own uploaded corpus. The corpus may cover any area of law — adapt your questions to whatever subject matter the supplied context contains.
 
 Your task: produce exactly {num_mcq} multiple-choice items and {num_short} short-answer items at "{difficulty}" difficulty. ALL items must be grounded in the supplied context — do not invent legal rules or cases. Cite at least one supporting chunk id in ``source_chunks`` for each item.
 

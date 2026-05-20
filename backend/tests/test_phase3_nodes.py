@@ -79,7 +79,7 @@ class TestNodeHelpers:
             ],
         }
         result = _format_context(state)
-        assert "RETRIEVED LECTURE SLIDES" in result
+        assert "RETRIEVED IMAGES / DIAGRAMS" in result
         assert "Slide about estates" in result
 
 

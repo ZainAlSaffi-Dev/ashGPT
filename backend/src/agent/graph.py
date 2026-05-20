@@ -1,4 +1,4 @@
-"""LangGraph workflow for the Property Law Exam Assistant.
+"""LangGraph workflow for the LawGPT study assistant.
 
 This module compiles the cognitive nodes (Phase 3) into a conditional state
 machine. The router's intent classification determines which reasoning path

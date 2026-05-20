@@ -1,4 +1,4 @@
-"""LangGraph state definition for the Property Law Exam Assistant.
+"""LangGraph state definition for the LawGPT study assistant.
 
 The state flows through the graph as follows:
 
