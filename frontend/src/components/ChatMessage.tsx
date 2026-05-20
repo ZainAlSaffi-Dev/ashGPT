@@ -123,10 +123,16 @@ export function ChatMessage({ turn }: Props) {
       </div>
       {mermaid && <MermaidRenderer diagram={mermaid} />}
       {turn.irac && (
-        <details className="mt-3 rounded border border-parchment-warm bg-parchment-warm/40 text-xs">
-          <summary className="cursor-pointer px-3 py-2 font-medium text-ink">IRAC analysis</summary>
-          <pre className="whitespace-pre-wrap px-3 py-2 text-ink-muted">{turn.irac}</pre>
-        </details>
+        <section className="mt-3 rounded-lg border border-parchment-warm bg-parchment-warm/40 px-3 py-2">
+          <h3 className="mb-1 font-serif text-sm font-semibold text-ink">
+            IRAC Analysis
+          </h3>
+          <div className="prose prose-sm max-w-none text-ink-muted prose-headings:font-serif prose-headings:text-ink prose-strong:text-ink">
+            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeCitations]}>
+              {turn.irac}
+            </ReactMarkdown>
+          </div>
+        </section>
       )}
       {turn.sources && (
         <SourcePanel sources={turn.sources} highlightedIndex={highlightedSource} />
