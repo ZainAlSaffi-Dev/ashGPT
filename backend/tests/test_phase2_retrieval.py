@@ -229,28 +229,37 @@ class TestCrossEncoderReranker:
 
 class TestRetrieveWithRerankerHook:
     def test_use_reranker_false_skips_reranker(self) -> None:
-        """Passing use_reranker=False must call MMR with k=k and skip rerank entirely."""
+        """Passing use_reranker=False must call the factory with k=k (no over-fetch)
+        and ``_maybe_rerank`` runs with ``use_reranker=False`` (no-op path)."""
         from src.agent import tools
 
         recorded: dict[str, int] = {}
 
         class FakeStore:
-            def max_marginal_relevance_search(self, query, k, fetch_k, lambda_mult, filter):
+            def search(self, query_vector, namespace, k, where=None):
                 recorded["k"] = k
                 return []
 
-            def similarity_search(self, query, k, filter):
-                recorded["k"] = k
+            def list_namespace(self, namespace):
                 return []
 
-        with patch.object(tools, "_get_vectorstore", return_value=FakeStore()):
-            with patch.object(tools, "_maybe_rerank", side_effect=lambda q, d, top_k, use_reranker, timings=None: d) as mr:
-                tools.retrieve_texts("q", k=8, use_reranker=False)
-                # k passed to MMR should equal user-requested k (no over-fetch)
-                assert recorded["k"] == 8
-                # _maybe_rerank still called but with use_reranker=False (no-op path)
-                mr.assert_called_once()
-                assert mr.call_args.kwargs["use_reranker"] is False
+        class FakeEmb:
+            def embed_query(self, q):
+                return [0.0] * 8
+
+        with patch.object(tools, "_get_store", return_value=FakeStore()):
+            with patch.object(tools, "_get_embeddings", return_value=FakeEmb()):
+                with patch.object(
+                    tools,
+                    "_maybe_rerank",
+                    side_effect=lambda q, d, top_k, use_reranker, timings=None: d,
+                ) as mr:
+                    # Force the dense-only path so we observe the factory call directly.
+                    with patch.object(tools, "USE_HYBRID_RETRIEVAL", False):
+                        tools.retrieve_texts("q", k=8, use_reranker=False)
+                    assert recorded["k"] == 8
+                    mr.assert_called_once()
+                    assert mr.call_args.kwargs["use_reranker"] is False
 
     def test_use_reranker_true_overfetches_then_reranks(self) -> None:
         """Passing use_reranker=True must over-fetch RERANKER_FETCH_K_TEXT candidates."""
@@ -260,21 +269,30 @@ class TestRetrieveWithRerankerHook:
         recorded: dict[str, int] = {}
 
         class FakeStore:
-            def max_marginal_relevance_search(self, query, k, fetch_k, lambda_mult, filter):
+            def search(self, query_vector, namespace, k, where=None):
                 recorded["k"] = k
                 return []
 
-            def similarity_search(self, query, k, filter):
-                recorded["k"] = k
+            def list_namespace(self, namespace):
                 return []
 
-        with patch.object(tools, "_get_vectorstore", return_value=FakeStore()):
-            with patch.object(tools, "_maybe_rerank", side_effect=lambda q, d, top_k, use_reranker, timings=None: d[:top_k]) as mr:
-                tools.retrieve_texts("q", k=8, use_reranker=True)
-                assert recorded["k"] == RERANKER_FETCH_K_TEXT
-                mr.assert_called_once()
-                assert mr.call_args.kwargs["use_reranker"] is True
-                assert mr.call_args.kwargs["top_k"] == 8
+        class FakeEmb:
+            def embed_query(self, q):
+                return [0.0] * 8
+
+        with patch.object(tools, "_get_store", return_value=FakeStore()):
+            with patch.object(tools, "_get_embeddings", return_value=FakeEmb()):
+                with patch.object(
+                    tools,
+                    "_maybe_rerank",
+                    side_effect=lambda q, d, top_k, use_reranker, timings=None: d[:top_k],
+                ) as mr:
+                    with patch.object(tools, "USE_HYBRID_RETRIEVAL", False):
+                        tools.retrieve_texts("q", k=8, use_reranker=True)
+                    assert recorded["k"] == RERANKER_FETCH_K_TEXT
+                    mr.assert_called_once()
+                    assert mr.call_args.kwargs["use_reranker"] is True
+                    assert mr.call_args.kwargs["top_k"] == 8
 
 
 @pytest.mark.integration

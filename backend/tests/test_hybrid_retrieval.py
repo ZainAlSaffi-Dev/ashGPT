@@ -1,35 +1,37 @@
 """End-to-end hybrid retrieval test — verifies BM25 + dense + RRF flow.
 
-Patches the Chroma vector store + BM25 source so the test is hermetic and
-doesn't need the real ChromaDB / ZeroEntropy embeddings on disk.
+Patches the factory-backed vector store + BM25 source so the test is
+hermetic and doesn't need pgvector / ZeroEntropy embeddings live.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.agent import bm25
 from src.agent import tools
+from src.storage.vector_store import SearchHit
 
 
-def _fake_langchain_doc(content: str, source: str, week: str = "week_3", t: str = "reading"):
-    """Mimic the LangChain ``Document`` shape that Chroma returns."""
-    return SimpleNamespace(
-        page_content=content,
+def _hit(content: str, source: str, week: str = "week_3", t: str = "reading") -> SearchHit:
+    """Mimic the factory ``SearchHit`` returned by the vector store."""
+    return SearchHit(
+        id=tools._doc_id(content, source),
+        score=0.9,
+        content=content,
         metadata={"source": source, "week": week, "type": t},
     )
 
 
 def test_hybrid_search_fuses_dense_and_bm25():
-    # Dense ranks doc_dense_only at the top; BM25 ranks doc_bm25_only at the
+    # Dense ranks the mabo doc at the top; BM25 ranks the pla1974 doc at the
     # top. RRF should surface both (and any shared doc that appears in both).
-    fake_dense_results = [
-        _fake_langchain_doc(
+    fake_dense_hits = [
+        _hit(
             "estoppel in equity bars retraction of representations relied upon",
             "estoppel.pdf",
         ),
-        _fake_langchain_doc(
+        _hit(
             "Mabo v Queensland recognised native title at common law",
             "mabo.pdf",
         ),
@@ -51,24 +53,31 @@ def test_hybrid_search_fuses_dense_and_bm25():
         ),
     ]
 
-    # Replace the live Chroma vector store + BM25 source with stubs.
     class _StubStore:
-        def max_marginal_relevance_search(self, query, k, fetch_k, lambda_mult, filter):
-            return fake_dense_results
+        def search(self, query_vector, namespace, k, where=None):
+            return fake_dense_hits
 
-    with patch.object(tools, "_get_vectorstore", return_value=_StubStore()):
-        bm25.configure_bm25_source(lambda ns: bm25_rows)
-        bm25.invalidate()
-        tools._bm25_initialised = True  # block default-source override
+        def list_namespace(self, namespace):
+            return []
 
-        fused = tools._hybrid_search(
-            query="section 38 adverse possession Mabo",
-            where_filter=None,
-            fetch_dense=4,
-            fetch_bm25=4,
-            fused_k=4,
-            namespace=None,
-        )
+    class _StubEmb:
+        def embed_query(self, q):
+            return [0.0] * 8
+
+    with patch.object(tools, "_get_store", return_value=_StubStore()):
+        with patch.object(tools, "_get_embeddings", return_value=_StubEmb()):
+            bm25.configure_bm25_source(lambda ns: bm25_rows)
+            bm25.invalidate()
+            tools._bm25_initialised = True  # block default-source override
+
+            fused = tools._hybrid_search(
+                query="section 38 adverse possession Mabo",
+                where_filter=None,
+                fetch_dense=4,
+                fetch_bm25=4,
+                fused_k=4,
+                namespace=None,
+            )
 
     sources = {d["source"] for d in fused}
     # Must contain at least one source unique to each leg → proves fusion.

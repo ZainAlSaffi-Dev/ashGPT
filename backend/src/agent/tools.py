@@ -1,15 +1,21 @@
-"""Retrieval tools for querying the Property Law ChromaDB knowledge base.
+"""Retrieval tools for querying the indexed knowledge base.
 
 These functions provide the 'senses' of the agent — they reach into the
-pre-indexed vector store and return relevant text chunks and slide
-descriptions, optionally filtered by week or document type.
+configured vector store (Chroma / pgvector / Vectorize) via the
+``src.storage.vector_store`` factory and return relevant text chunks and
+slide descriptions, optionally filtered by week or document type.
 
 Two retrieval modes:
 
   * ``USE_HYBRID_RETRIEVAL=True`` (default) — runs BM25 + dense in parallel
-    and fuses with Reciprocal Rank Fusion before reranking. Higher precision
-    on legal text (case names, statutory refs benefit from BM25 term-match).
-  * ``USE_HYBRID_RETRIEVAL=False`` — legacy dense-only MMR path.
+    (`ThreadPoolExecutor`) and fuses with Reciprocal Rank Fusion before
+    reranking. Higher precision on legal text (case names, statutory refs
+    benefit from BM25 term-match).
+  * ``USE_HYBRID_RETRIEVAL=False`` — legacy dense-only path.
+
+The dense leg uses cosine ANN over the configured backend. MMR is no
+longer applied client-side; the cross-encoder/Cohere reranker downstream
+handles candidate diversity instead.
 """
 
 from __future__ import annotations
@@ -19,9 +25,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import chromadb
 from dotenv import load_dotenv
-from langchain_chroma import Chroma
 
 from src.agent.bm25 import (
     configure_bm25_source,
@@ -32,12 +36,8 @@ from src.agent.state import RetrievedDocument
 from src.config import (
     BM25_FETCH_K_SLIDES,
     BM25_FETCH_K_TEXT,
-    CHROMA_COLLECTION,
-    CHROMA_DIR,
     HYBRID_FUSED_K_SLIDES,
     HYBRID_FUSED_K_TEXT,
-    MMR_FETCH_K,
-    MMR_LAMBDA,
     RERANKER_FETCH_K_SLIDES,
     RERANKER_FETCH_K_TEXT,
     RETRIEVAL_STRATEGY,
@@ -48,44 +48,45 @@ from src.config import (
     USE_RERANKER,
 )
 from src.embeddings import ZeroEntropyEmbeddings
+from src.storage.vector_store import SearchHit, VectorStore, make_vector_store
 
 load_dotenv()
 
 log = logging.getLogger(__name__)
 
-# ── Singleton vector store ─────────────────────────────────────────────────────
+# ── Singleton vector store (factory-backed) ────────────────────────────────────
 
-_vectorstore: Chroma | None = None
-_vectorstore_missing_logged: bool = False
+_store: VectorStore | None = None
+_embeddings: ZeroEntropyEmbeddings | None = None
 
 
-def _get_vectorstore() -> Chroma | None:
-    """Lazily initialise and cache the ChromaDB vector store.
+def _get_store() -> VectorStore:
+    """Lazily build and cache the configured vector store.
 
-    Returns ``None`` when ``CHROMA_DIR`` does not exist (the prod
-    container ships without a baked Chroma DB — retrieval should switch
-    to the storage factory + pgvector once that path is wired). Callers
-    must check for ``None`` and skip the retrieval leg.
+    Honours ``VECTOR_BACKEND`` env (pgvector in prod, chroma in local dev).
+    Fails loud if the backend is misconfigured — silent ``None`` returns
+    used to mask retrieval outages and produce ungrounded answers.
     """
-    global _vectorstore, _vectorstore_missing_logged
-    if _vectorstore is None:
-        if not CHROMA_DIR.exists():
-            if not _vectorstore_missing_logged:
-                log.warning(
-                    "CHROMA_DIR %s missing — retrieval disabled. Switch to "
-                    "pgvector via src.storage.vector_store in this env.",
-                    CHROMA_DIR,
-                )
-                _vectorstore_missing_logged = True
-            return None
-        persistent_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-        _vectorstore = Chroma(
-            client=persistent_client,
-            collection_name=CHROMA_COLLECTION,
-            embedding_function=ZeroEntropyEmbeddings(),
-        )
-        log.info("ChromaDB vector store loaded from %s", CHROMA_DIR)
-    return _vectorstore
+    global _store
+    if _store is None:
+        _store = make_vector_store()
+        log.info("vector store initialised: %s", type(_store).__name__)
+    return _store
+
+
+def _get_embeddings() -> ZeroEntropyEmbeddings:
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = ZeroEntropyEmbeddings()
+    return _embeddings
+
+
+def _reset_singletons_for_tests() -> None:
+    """Drop the cached store + embeddings (tests that swap backends)."""
+    global _store, _embeddings, _bm25_initialised
+    _store = None
+    _embeddings = None
+    _bm25_initialised = False
 
 
 # ── Metadata filter builders ──────────────────────────────────────────────────
@@ -145,24 +146,25 @@ _bm25_initialised = False
 
 
 def _bm25_source(namespace: str | None) -> list[tuple[str, str, dict]]:
-    """Pull all chunks for ``namespace`` from Chroma → BM25 corpus rows."""
-    if not CHROMA_DIR.exists():
-        return []
-    persistent_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    collection = persistent_client.get_or_create_collection(CHROMA_COLLECTION)
-    where = {"namespace": {"$eq": namespace}} if namespace else None
+    """Pull every chunk for ``namespace`` from the configured store → BM25 rows.
+
+    Goes through the ``VectorStore.list_namespace`` adapter so the BM25
+    corpus tracks whichever backend ingestion writes to (pgvector in prod,
+    chroma in local dev).
+    """
     try:
-        data = collection.get(where=where, include=["documents", "metadatas"])
-    except Exception:
-        # New empty namespace.
+        items = _get_store().list_namespace(namespace or "")
+    except NotImplementedError:
+        log.warning("vector store does not support enumeration; BM25 corpus empty")
         return []
-    docs = data.get("documents") or []
-    metas = data.get("metadatas") or []
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("bm25 source: list_namespace failed (%s)", exc)
+        return []
     rows: list[tuple[str, str, dict]] = []
-    for content, meta in zip(docs, metas):
-        meta = meta or {}
-        rid = meta.get("chunk_id") or _doc_id(content, meta.get("source", ""))
-        rows.append((rid, content, meta))
+    for it in items:
+        meta = it.metadata or {}
+        rid = meta.get("chunk_id") or _doc_id(it.content, meta.get("source", ""))
+        rows.append((rid, it.content, meta))
     return rows
 
 
@@ -183,25 +185,38 @@ def _ensure_bm25_configured() -> None:
 # ── Search dispatch ───────────────────────────────────────────────────────────
 
 
-def _search(
-    store: Chroma,
-    query: str,
-    k: int,
-    where_filter: dict | None,
-    strategy: str | None = None,
-) -> list:
-    """Run either similarity or MMR search based on the configured strategy."""
-    strat = strategy or RETRIEVAL_STRATEGY
+def _hit_to_retrieved(hit: SearchHit) -> RetrievedDocument:
+    """Map a factory ``SearchHit`` into the agent's ``RetrievedDocument``."""
+    meta = hit.metadata or {}
+    return RetrievedDocument(
+        content=hit.content,
+        source=meta.get("source", ""),
+        week=meta.get("week", ""),
+        doc_type=meta.get("type", ""),
+        image_path=meta.get("image_path"),
+    )
 
-    if strat == "mmr":
-        return store.max_marginal_relevance_search(
-            query,
-            k=k,
-            fetch_k=MMR_FETCH_K,
-            lambda_mult=MMR_LAMBDA,
-            filter=where_filter,
-        )
-    return store.similarity_search(query, k=k, filter=where_filter)
+
+def _dense_search(
+    query_vector: list[float],
+    k: int,
+    factory_where: dict,
+    namespace: str | None,
+) -> list[SearchHit]:
+    """Cosine ANN over the configured vector store.
+
+    The factory always filters by ``namespace`` at the SQL/HTTP layer (it's a
+    column on pgvector, a separate vectorize param). Strip any ``namespace``
+    key out of the metadata where-dict before forwarding — pgvector doesn't
+    store namespace inside the JSONB metadata blob.
+    """
+    where = {k_: v for k_, v in (factory_where or {}).items() if k_ != "namespace"}
+    return _get_store().search(
+        query_vector=query_vector,
+        namespace=namespace or "",
+        k=k,
+        where=where or None,
+    )
 
 
 # ── Hybrid (BM25 + dense) retrieval with RRF fusion ───────────────────────────
@@ -216,71 +231,71 @@ def _hybrid_search(
     namespace: str | None,
     timings: dict | None = None,
 ) -> list[RetrievedDocument]:
-    """Dense MMR + BM25 fused via RRF, returning the top-``fused_k`` docs.
+    """Dense ANN + BM25 fused via RRF, returning the top-``fused_k`` docs.
 
-    Both legs use the same ``_doc_id`` scheme so RRF can align them. Metadata
-    (source, week, doc_type, image_path) comes from whichever leg saw the doc
-    first — content from the same lookup.
+    Dense and BM25 legs run concurrently in a 2-worker thread pool (both are
+    blocking I/O: dense = Postgres round-trip, BM25 = in-memory but uses the
+    GIL-released ``rank_bm25`` scorer). Query embedding is computed once
+    before the split so both legs reuse it. RRF aligns the two ranked id
+    lists via the same ``_doc_id`` scheme used by ingestion.
     """
     _ensure_bm25_configured()
 
-    # Dense leg (MMR over a larger pool — RRF benefits from candidate breadth).
-    store = _get_vectorstore()
-    if store is None:
-        if timings is not None:
-            timings["dense_ms"] = 0.0
-            timings["bm25_ms"] = 0.0
-        return []
-    t0 = time.perf_counter()
-    dense_results = store.max_marginal_relevance_search(
-        query,
-        k=fetch_dense,
-        fetch_k=max(MMR_FETCH_K, fetch_dense * 2),
-        lambda_mult=MMR_LAMBDA,
-        filter=where_filter,
-    )
-    dense_ms = (time.perf_counter() - t0) * 1000
+    factory_where = _chroma_filter_to_meta(where_filter) if where_filter else {}
 
-    by_id: dict[str, RetrievedDocument] = {}
-    dense_ranked: list[str] = []
-    for doc in dense_results:
-        meta = doc.metadata or {}
-        rid = meta.get("chunk_id") or _doc_id(doc.page_content, meta.get("source", ""))
-        dense_ranked.append(rid)
-        if rid not in by_id:
-            by_id[rid] = RetrievedDocument(
-                content=doc.page_content,
+    # Embed once before the split — both legs reuse this vector.
+    t_embed = time.perf_counter()
+    qv = _get_embeddings().embed_query(query)
+    embed_ms = (time.perf_counter() - t_embed) * 1000
+
+    def _dense_leg() -> tuple[list[str], dict[str, RetrievedDocument], float]:
+        t0 = time.perf_counter()
+        hits = _dense_search(
+            qv,
+            k=fetch_dense,
+            factory_where=factory_where,
+            namespace=namespace,
+        )
+        ms = (time.perf_counter() - t0) * 1000
+        ranked: list[str] = []
+        by_id: dict[str, RetrievedDocument] = {}
+        for h in hits:
+            meta = h.metadata or {}
+            rid = meta.get("chunk_id") or _doc_id(h.content, meta.get("source", ""))
+            ranked.append(rid)
+            if rid not in by_id:
+                by_id[rid] = _hit_to_retrieved(h)
+        return ranked, by_id, ms
+
+    def _bm25_leg() -> tuple[list[str], dict[str, RetrievedDocument], float]:
+        bm25_index = get_bm25_index(namespace)
+        t0 = time.perf_counter()
+        hits = bm25_index.search(query, k=fetch_bm25, where=factory_where)
+        ms = (time.perf_counter() - t0) * 1000
+        ranked: list[str] = []
+        by_id: dict[str, RetrievedDocument] = {}
+        for doc_id, _score in hits:
+            ranked.append(doc_id)
+            got = bm25_index.get_content(doc_id)
+            if got is None:
+                continue
+            content, meta = got
+            by_id[doc_id] = RetrievedDocument(
+                content=content,
                 source=meta.get("source", ""),
                 week=meta.get("week", ""),
                 doc_type=meta.get("type", ""),
                 image_path=meta.get("image_path"),
             )
+        return ranked, by_id, ms
 
-    # BM25 leg (lexical) — uses same metadata filter dialect translated to
-    # the in-memory matcher (week, doc_type, namespace).
-    bm25_where: dict = {}
-    if where_filter:
-        bm25_where = _chroma_filter_to_meta(where_filter)
-    bm25_index = get_bm25_index(namespace)
-    t1 = time.perf_counter()
-    bm25_hits = bm25_index.search(query, k=fetch_bm25, where=bm25_where)
-    bm25_ms = (time.perf_counter() - t1) * 1000
-    bm25_ranked: list[str] = []
-    for doc_id, _score in bm25_hits:
-        bm25_ranked.append(doc_id)
-        if doc_id in by_id:
-            continue
-        got = bm25_index.get_content(doc_id)
-        if got is None:
-            continue
-        content, meta = got
-        by_id[doc_id] = RetrievedDocument(
-            content=content,
-            source=meta.get("source", ""),
-            week=meta.get("week", ""),
-            doc_type=meta.get("type", ""),
-            image_path=meta.get("image_path"),
-        )
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hybrid") as ex:
+        fd = ex.submit(_dense_leg)
+        fb = ex.submit(_bm25_leg)
+        dense_ranked, dense_by_id, dense_ms = fd.result()
+        bm25_ranked, bm25_by_id, bm25_ms = fb.result()
+
+    by_id: dict[str, RetrievedDocument] = {**bm25_by_id, **dense_by_id}
 
     fused = reciprocal_rank_fusion(
         [dense_ranked, bm25_ranked],
@@ -292,23 +307,26 @@ def _hybrid_search(
         if doc_id in by_id:
             top.append(by_id[doc_id])
     log.info(
-        "hybrid: dense=%d bm25=%d fused=%d (ns=%s) dense_ms=%.1f bm25_ms=%.1f",
+        "hybrid: dense=%d bm25=%d fused=%d (ns=%s) embed_ms=%.1f dense_ms=%.1f bm25_ms=%.1f",
         len(dense_ranked),
         len(bm25_ranked),
         len(top),
         namespace,
+        embed_ms,
         dense_ms,
         bm25_ms,
     )
     if timings is not None:
+        timings["embed_ms"] = round(embed_ms, 1)
         timings["dense_ms"] = round(dense_ms, 1)
         timings["bm25_ms"] = round(bm25_ms, 1)
     return top
 
 
 def _chroma_filter_to_meta(f: dict) -> dict:
-    """Flatten the Chroma where-filter dict into a flat ``{key: value}`` form
-    that ``bm25._meta_match`` understands.
+    """Flatten the intermediate ``{"$and": [...]}`` filter shape into the flat
+    ``{key: value}`` form consumed by both ``bm25._meta_match`` and the
+    factory's ``PgVectorStore`` JSONB where-builder.
 
     Supported inputs: leaf ``{"k": {"$eq": v}}`` or ``{"k": {"$in": [...]}}``
     and ``{"$and": [...]}`` of such leaves. Unknown ops are dropped.
@@ -330,21 +348,8 @@ def _chroma_filter_to_meta(f: dict) -> dict:
 # ── Retrieval functions ───────────────────────────────────────────────────────
 
 
-def _raw_to_retrieved(results: list) -> list[RetrievedDocument]:
-    """Convert LangChain Document objects to our RetrievedDocument dicts."""
-    docs: list[RetrievedDocument] = []
-    for doc in results:
-        meta = doc.metadata
-        docs.append(
-            RetrievedDocument(
-                content=doc.page_content,
-                source=meta.get("source", ""),
-                week=meta.get("week", ""),
-                doc_type=meta.get("type", ""),
-                image_path=meta.get("image_path"),
-            )
-        )
-    return docs
+def _hits_to_retrieved(hits: list[SearchHit]) -> list[RetrievedDocument]:
+    return [_hit_to_retrieved(h) for h in hits]
 
 
 def _maybe_rerank(
@@ -367,7 +372,7 @@ def _maybe_rerank(
             timings["rerank_ms"] = round((time.perf_counter() - t0) * 1000, 1)
         return out
     except Exception as e:  # pragma: no cover — graceful fallback
-        log.warning("Reranker unavailable (%s); falling back to MMR order", e)
+        log.warning("Reranker unavailable (%s); falling back to candidate order", e)
         return docs[:top_k]
 
 
@@ -421,20 +426,20 @@ def retrieve_texts(
         )
     else:
         t_d = time.perf_counter()
-        store = _get_vectorstore()
-        if store is None:
-            results: list = []
-        else:
-            results = _search(store, query, k=fetch_k, where_filter=where_filter, strategy=strategy)
+        factory_where = _chroma_filter_to_meta(where_filter) if where_filter else {}
+        qv = _get_embeddings().embed_query(query)
+        hits = _dense_search(
+            qv, k=fetch_k, factory_where=factory_where, namespace=namespace
+        )
         leg_timings["dense_ms"] = round((time.perf_counter() - t_d) * 1000, 1)
         log.info(
             "retrieve_texts [%s, rerank=%s]: %d candidates (week=%s)",
             strategy or RETRIEVAL_STRATEGY,
             rerank_on,
-            len(results),
+            len(hits),
             week,
         )
-        docs = _raw_to_retrieved(results)
+        docs = _hits_to_retrieved(hits)
     out = _maybe_rerank(query, docs, top_k=k, use_reranker=rerank_on, timings=leg_timings)
     leg_timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
     if timings is not None:
@@ -490,20 +495,20 @@ def retrieve_slides(
         )
     else:
         t_d = time.perf_counter()
-        store = _get_vectorstore()
-        if store is None:
-            results: list = []
-        else:
-            results = _search(store, query, k=fetch_k, where_filter=where_filter, strategy=strategy)
+        factory_where = _chroma_filter_to_meta(where_filter) if where_filter else {}
+        qv = _get_embeddings().embed_query(query)
+        hits = _dense_search(
+            qv, k=fetch_k, factory_where=factory_where, namespace=namespace
+        )
         leg_timings["dense_ms"] = round((time.perf_counter() - t_d) * 1000, 1)
         log.info(
             "retrieve_slides [%s, rerank=%s]: %d candidates (week=%s)",
             strategy or RETRIEVAL_STRATEGY,
             rerank_on,
-            len(results),
+            len(hits),
             week,
         )
-        docs = _raw_to_retrieved(results)
+        docs = _hits_to_retrieved(hits)
     out = _maybe_rerank(query, docs, top_k=k, use_reranker=rerank_on, timings=leg_timings)
     leg_timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
     if timings is not None:
@@ -525,10 +530,12 @@ def retrieve_all(
 
     The two legs are independent (different metadata filters, different
     candidate pools) and each performs blocking I/O (ZeroEntropy embed,
-    Chroma query, BM25 in-memory search, Cohere rerank REST call). Running
-    them in a 2-worker thread pool halves the wall-clock spent in retrieval
-    on the typical hot path. Embeddings are deduped by a thread-safe LRU
-    on the ZeroEntropyEmbeddings singleton (see src/embeddings.py).
+    vector store query, BM25 in-memory search, Cohere rerank REST call).
+    Running them in a 2-worker thread pool halves the wall-clock spent in
+    retrieval on the typical hot path. Inside each leg, dense and BM25 are
+    parallelised again so the total retrieval graph is two levels deep.
+    Embeddings are deduped by a thread-safe LRU on the ZeroEntropyEmbeddings
+    singleton (see src/embeddings.py).
     """
     t_dict: dict[str, float] = {}
     s_dict: dict[str, float] = {}
