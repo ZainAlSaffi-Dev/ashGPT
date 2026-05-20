@@ -1,32 +1,14 @@
 """BM25 retrieval leg + Reciprocal Rank Fusion for hybrid search.
 
-Why hybrid:
-  Dense embeddings excel at semantic queries ("show me cases about adverse
-  occupation") but underperform on rare-term lookups (case names like
-  *Mabo v Queensland* or statutory section refs like *s 31 Property Law Act*).
-  BM25 nails those. Fusing both with RRF lifts retrieval precision without
-  needing per-leg score normalisation.
+Tokeniser is law-aware: collapses neutral citations (``[2021] HCA 5`` →
+``cite:2021_hca_5``) and statutory section refs (``s 31(1)(a)`` →
+``sec:31_1_a``) into single tokens so they survive IDF as rare signals.
+Strips a small legal stopword list (``v``, ``s``, ``the``…) that otherwise
+dominate token counts in legal corpora.
 
-  Eval results from Phase 0 showed the cross-encoder reranker alone was a
-  weak boost; adding BM25 + RRF in front of it gives a stronger candidate
-  pool to rerank.
-
-Tokenisation:
-  Lowercase, word-split (keep digits + apostrophes — relevant for citations
-  like "Williams' Trustees"). No stopword removal: BM25 already downweights
-  high-frequency terms via IDF.
-
-Index lifecycle:
-  Per-namespace cached indexers, lazily built from ``BM25Source`` (a callable
-  that returns the namespace's corpus). Cache invalidates on ``invalidate()``;
-  ingestion calls it after upserting new chunks.
-
-Example:
-    >>> idx = BM25Index([("d1", "adverse possession requires continuous use"),
-    ...                  ("d2", "estoppel in equity")])
-    >>> ranked = idx.search("adverse possession", k=2)
-    >>> ranked[0][0]
-    'd1'
+RRF fusion weights are tunable per call — defaults (see
+``config.RRF_WEIGHT_DENSE`` / ``RRF_WEIGHT_BM25``) favour the dense leg
+since rerank-on-dense outperformed equal-weight hybrid in our eval.
 """
 
 from __future__ import annotations
@@ -40,20 +22,90 @@ from rank_bm25 import BM25Okapi
 
 log = logging.getLogger(__name__)
 
-# Word chars + apostrophe (for possessives in case names); split on non-word.
+
+# Tokens that dominate legal text but carry no retrieval signal. Single-letter
+# abbreviations ("v", "s", "r") appear in nearly every legal paragraph and
+# would otherwise drown out IDF; the rest are commodity English stopwords that
+# inflate doc length without distinguishing content.
+_LEGAL_STOPWORDS = frozenset(
+    {
+        "v", "s", "r",
+        "the", "a", "an", "of", "and", "or", "in", "on", "at", "to",
+        "is", "was", "be", "by", "for", "with", "as", "it",
+    }
+)
+
+# Australian neutral citation: "[2021] HCA 5", "(2020) 270 CLR 372",
+# "[1992] HCA 23; (1992) 175 CLR 1". Year, optional volume, court/reporter,
+# pinpoint — folded into a single rare token.
+_CITATION_RE = re.compile(
+    r"[\[\(](\d{4})[\]\)]\s*(?:(\d+)\s+)?([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*)\s+(\d+[A-Za-z]?)",
+)
+
+# Statutory section ref: "s 31", "s 31(1)(a)", "ss 31-33", "section 31(2)".
+# Subdivisions survive as part of the token so "s 31(1)(a)" ≠ "s 31(2)".
+_SECTION_RE = re.compile(
+    r"\b(?:s|ss|section|sections)\s+(\d+[A-Za-z]?(?:\s*\(\s*[0-9A-Za-z]+\s*\))*(?:\s*-\s*\d+[A-Za-z]?)?)",
+    re.IGNORECASE,
+)
+
+# Word chars + apostrophe (for possessives like "Williams'"); split on non-word.
 _TOKEN_RE = re.compile(r"[A-Za-z0-9']+")
 
 
+def _normalise_section(raw: str) -> str:
+    """``31(1)(a)`` → ``sec:31_1_a``; ``31-33`` → ``sec:31-33``."""
+    parts = re.findall(r"[0-9A-Za-z]+(?:-\d+[A-Za-z]?)?", raw)
+    return "sec:" + "_".join(p.lower() for p in parts) if parts else ""
+
+
+def _extract_citation_tokens(text: str) -> tuple[str, list[str]]:
+    tokens: list[str] = []
+
+    def sub(m: re.Match) -> str:
+        year, vol, court, pinpoint = m.group(1), m.group(2), m.group(3), m.group(4)
+        court_slug = re.sub(r"\s+", "_", court).lower()
+        bits = [year, court_slug, pinpoint.lower()]
+        if vol:
+            bits.insert(1, vol)
+        tokens.append("cite:" + "_".join(bits))
+        return " "  # consume so the digits/letters don't re-tokenise as bare words
+
+    stripped = _CITATION_RE.sub(sub, text)
+    return stripped, tokens
+
+
+def _extract_section_tokens(text: str) -> tuple[str, list[str]]:
+    tokens: list[str] = []
+
+    def sub(m: re.Match) -> str:
+        norm = _normalise_section(m.group(1))
+        if norm:
+            tokens.append(norm)
+        return " "
+
+    stripped = _SECTION_RE.sub(sub, text)
+    return stripped, tokens
+
+
 def tokenize(text: str) -> list[str]:
-    """Lowercase + word-split. Stable across the package — used by both index
-    construction and query encoding so token alignment is guaranteed.
+    """Law-aware tokeniser. Stable across index + query so tokens align.
 
     >>> tokenize("Mabo v Queensland (No 2) — adverse possession")
-    ['mabo', 'v', 'queensland', 'no', '2', 'adverse', 'possession']
+    ['mabo', 'queensland', 'no', '2', 'adverse', 'possession']
+    >>> sorted(tokenize("Held in [2021] HCA 5 that s 31(1)(a) applies."))
+    ['applies', 'cite:2021_hca_5', 'held', 'sec:31_1_a', 'that']
     """
     if not text:
         return []
-    return [m.group(0).lower() for m in _TOKEN_RE.finditer(text)]
+    text, cite_tokens = _extract_citation_tokens(text)
+    text, sec_tokens = _extract_section_tokens(text)
+    word_tokens = [
+        m.group(0).lower()
+        for m in _TOKEN_RE.finditer(text)
+        if m.group(0).lower() not in _LEGAL_STOPWORDS
+    ]
+    return [*cite_tokens, *sec_tokens, *word_tokens]
 
 
 @dataclass

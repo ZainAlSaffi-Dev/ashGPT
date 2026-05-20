@@ -136,7 +136,7 @@ class TestComputeSummary:
                 "case_id": "mock_a",
                 "agent": _mock_agent(),
                 "baseline": _mock_baseline(),
-                "ablation_no_ratio": _mock_ablation(),
+                "ablation_mega_prompt": _mock_ablation(),
             }
         ]
 
@@ -160,7 +160,7 @@ class TestComputeSummary:
                 "case_id": "m1",
                 "agent": _mock_agent(groundedness={"score": 4}, node_latencies={"router": 2.0}),
                 "baseline": _mock_baseline(groundedness={"score": 2}),
-                "ablation_no_ratio": _mock_ablation(groundedness={"score": 3}),
+                "ablation_mega_prompt": _mock_ablation(groundedness={"score": 3}),
             },
             {
                 "query": "q2",
@@ -168,7 +168,7 @@ class TestComputeSummary:
                 "case_id": "m2",
                 "agent": _mock_agent(groundedness={"score": 5}, node_latencies={"router": 4.0}),
                 "baseline": _mock_baseline(groundedness={"score": 4}),
-                "ablation_no_ratio": _mock_ablation(groundedness={"score": 5}),
+                "ablation_mega_prompt": _mock_ablation(groundedness={"score": 5}),
             },
         ]
         summary = _compute_summary(mock_results)
@@ -192,7 +192,7 @@ class TestPlotGeneration:
                     node_latencies={"router": 3.0, "retrieval": 2.0, "ratio_extractor": 15.0, "synthesis": 10.0},
                 ),
                 "baseline": _mock_baseline(groundedness={"score": 3}, latency_s=8.0),
-                "ablation_no_ratio": _mock_ablation(groundedness={"score": 4}, latency_s=15.0),
+                "ablation_mega_prompt": _mock_ablation(groundedness={"score": 4}, latency_s=15.0),
             },
             {
                 "query": "Explain the Torrens system",
@@ -205,7 +205,7 @@ class TestPlotGeneration:
                     node_latencies={"router": 2.5, "retrieval": 1.5, "synthesis": 12.0},
                 ),
                 "baseline": _mock_baseline(groundedness={"score": 2}, latency_s=6.0),
-                "ablation_no_ratio": _mock_ablation(groundedness={"score": 3}, latency_s=12.0),
+                "ablation_mega_prompt": _mock_ablation(groundedness={"score": 3}, latency_s=12.0),
             },
         ]
 

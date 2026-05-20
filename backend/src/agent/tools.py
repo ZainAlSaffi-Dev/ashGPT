@@ -40,6 +40,8 @@ from src.config import (
     RERANKER_FETCH_K_TEXT,
     RETRIEVAL_STRATEGY,
     RRF_K,
+    RRF_WEIGHT_BM25,
+    RRF_WEIGHT_DENSE,
     USE_HYBRID_RETRIEVAL,
     USE_RERANKER,
 )
@@ -250,7 +252,11 @@ def _hybrid_search(
             image_path=meta.get("image_path"),
         )
 
-    fused = reciprocal_rank_fusion([dense_ranked, bm25_ranked], k=RRF_K)
+    fused = reciprocal_rank_fusion(
+        [dense_ranked, bm25_ranked],
+        k=RRF_K,
+        weights=[RRF_WEIGHT_DENSE, RRF_WEIGHT_BM25],
+    )
     top: list[RetrievedDocument] = []
     for doc_id, _score in fused[:fused_k]:
         if doc_id in by_id:

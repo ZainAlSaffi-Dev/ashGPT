@@ -282,6 +282,10 @@ class TestRetrieveWithRerankerHook:
 class TestRerankerIntegration:
     def test_real_reranker_against_three_chunks(self) -> None:
         """Sanity-check the real cross-encoder against three hand-built chunks."""
+        pytest.importorskip(
+            "sentence_transformers",
+            reason="sentence-transformers not installed (Cohere path is the deployment default)",
+        )
         from src.agent.reranker import CrossEncoderReranker
 
         chunks = [

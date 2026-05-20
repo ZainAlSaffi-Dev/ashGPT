@@ -15,9 +15,9 @@ from src.agent.bm25 import (
 
 
 def test_tokenize_basic():
+    # 'v' is a legal stopword — stripped. Substantive nouns + digits stay.
     assert tokenize("Mabo v Queensland (No 2) — adverse possession") == [
         "mabo",
-        "v",
         "queensland",
         "no",
         "2",
@@ -29,6 +29,75 @@ def test_tokenize_basic():
 def test_tokenize_empty():
     assert tokenize("") == []
     assert tokenize("   ") == []
+
+
+def test_tokenize_preserves_neutral_citation():
+    toks = tokenize("Held in [2021] HCA 5 that the principle stands.")
+    assert "cite:2021_hca_5" in toks
+    # Bare year / court / pinpoint NOT emitted as separate tokens — they were
+    # consumed so the citation survives IDF as one rare signal, not three
+    # commodity tokens.
+    assert "2021" not in toks
+    assert "hca" not in toks
+
+
+def test_tokenize_preserves_volume_citation():
+    toks = tokenize("(1992) 175 CLR 1 recognised native title.")
+    assert "cite:1992_175_clr_1" in toks
+
+
+def test_tokenize_preserves_section_with_subdivisions():
+    toks = tokenize("Refer to s 31(1)(a) of the Property Law Act.")
+    assert "sec:31_1_a" in toks
+    assert "31" not in toks
+    assert "s" not in toks
+
+
+def test_tokenize_handles_section_range():
+    toks = tokenize("See sections 31-33 for the statutory scheme.")
+    assert "sec:31-33" in toks
+
+
+def test_tokenize_strips_legal_stopwords():
+    toks = tokenize("The plaintiff v the defendant and the trustee of s 5.")
+    assert "v" not in toks
+    assert "the" not in toks
+    assert "of" not in toks
+    assert "and" not in toks
+    assert "plaintiff" in toks
+    assert "defendant" in toks
+    assert "trustee" in toks
+    assert "sec:5" in toks
+
+
+def test_citation_token_distinguishes_two_citations():
+    toks = tokenize("Compare [2021] HCA 5 with [2019] HCA 11.")
+    assert "cite:2021_hca_5" in toks
+    assert "cite:2019_hca_11" in toks
+
+
+def test_bm25_ranks_citation_match_highest():
+    idx = BM25Index(
+        [
+            ("d1", "The decision in [2021] HCA 5 established the test.", {}),
+            ("d2", "An unrelated discussion of adverse possession.", {}),
+            ("d3", "Williams v Bowen has nothing on point.", {}),
+        ]
+    )
+    hits = idx.search("[2021] HCA 5", k=3)
+    assert hits[0][0] == "d1"
+
+
+def test_bm25_ranks_section_match_highest():
+    idx = BM25Index(
+        [
+            ("d1", "s 31(1)(a) requires written notice.", {}),
+            ("d2", "Section 12 deals with mortgages.", {}),
+            ("d3", "General principles of contract law apply.", {}),
+        ]
+    )
+    hits = idx.search("section 31(1)(a)", k=3)
+    assert hits[0][0] == "d1"
 
 
 def test_bm25_ranks_term_match_highest():

@@ -59,6 +59,11 @@ BM25_FETCH_K_SLIDES = 12
 RRF_K = 60                    # RRF constant; 60 is the canonical default
 HYBRID_FUSED_K_TEXT = 16      # RRF reduces to this many before reranking
 HYBRID_FUSED_K_SLIDES = 8
+# Dense weighted higher than BM25: eval (n=10) showed dense+rerank beat 1:1
+# hybrid on precision@k. BM25 still carries signal for case names / section
+# refs (now preserved as single tokens) so its weight stays non-trivial.
+RRF_WEIGHT_DENSE = 0.7
+RRF_WEIGHT_BM25 = 0.3
 
 # ── Cross-encoder reranker (post-MMR / post-fusion) ───────────────────────────
 # When enabled, MMR over-fetches RERANKER_FETCH_K_* candidates and the cross
