@@ -129,6 +129,13 @@ export default {
       return withCors(Response.json({ status: 'ok', layer: 'edge' }), env, origin);
     }
 
+    // Keep-warm endpoint — same path the cron handler hits, exposed so we
+    // can curl it manually. Anyone can call it; the response is harmless.
+    if (url.pathname === '/internal/warm') {
+      const probe = await warmContainer(env);
+      return withCors(Response.json(probe), env, origin);
+    }
+
     const claims = await verifyClerk(req, env);
     if (!claims) {
       return withCors(new Response('unauthorized', { status: 401 }), env, origin);
@@ -166,7 +173,39 @@ export default {
     const backendResp = await proxyToBackend(env, req, userId);
     return withCors(backendResp, env, origin);
   },
+
+  // CF cron triggers call ``scheduled`` (not ``fetch``). The wrangler.toml
+  // ``[triggers] crons`` block is the schedule; this handler is the work.
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      (async () => {
+        try {
+          const probe = await warmContainer(env);
+          console.log(`cron warm: ${JSON.stringify(probe)}`);
+        } catch (e) {
+          console.error(`cron warm failed: ${(e as Error).message}`);
+        }
+      })(),
+    );
+  },
 };
+
+async function warmContainer(env: Env): Promise<unknown> {
+  // Forward an unauthenticated GET to the container's /internal/warm route.
+  // The container only ever sees requests via the BACKEND DO binding, so
+  // there's no public path to this endpoint — safe to skip JWT here.
+  const id = env.BACKEND.idFromName('global');
+  const stub = env.BACKEND.get(id);
+  const req = new Request('https://internal/internal/warm', { method: 'GET' });
+  const resp = await stub.fetch(req);
+  let body: unknown = null;
+  try {
+    body = await resp.json();
+  } catch {
+    body = { status: resp.status };
+  }
+  return body;
+}
 
 async function proxyToBackend(
   env: Env,

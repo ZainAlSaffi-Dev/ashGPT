@@ -61,6 +61,38 @@ def health() -> dict:
     return {"status": "ok", "version": app.version}
 
 
+@app.get("/internal/warm")
+def warm() -> dict:
+    """Cheap end-to-end probe used by the Worker cron keep-warm.
+
+    Touches the vector store at the SQL layer so a cold pgvector pool
+    doesn't bite the first real chat request after an idle container
+    spin-down. Returns ``vector_store`` so cron logs can confirm the
+    backend the container booted with.
+    """
+    settings = get_settings()
+    vector_ok = False
+    try:
+        # Lightweight probe: instantiate the configured store and run a
+        # trivial namespace enumeration against a sentinel namespace that
+        # is guaranteed not to exist. For pgvector this issues a SELECT
+        # that warms the connection pool + verifies the schema.
+        from src.storage.vector_store import make_vector_store
+
+        store = make_vector_store()
+        store.list_namespace("__warm_probe__")
+        vector_ok = True
+    except NotImplementedError:
+        # Vectorize backend can't enumerate — that's still a healthy boot.
+        vector_ok = True
+    except Exception as exc:  # pragma: no cover — degraded path
+        log.warning("warm probe: vector store unreachable (%s)", exc)
+    return {
+        "ok": vector_ok,
+        "vector_backend": settings.vector_backend,
+    }
+
+
 app.include_router(chat_router)
 app.include_router(sessions_router)
 app.include_router(files_router)

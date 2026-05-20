@@ -13,6 +13,14 @@ invocation_logs = true
 [observability.traces]
 enabled = false
 
+# Keep-warm cron — every 5 minutes pings the container so the DO
+# doesn't cold-start (sleepAfter=10m) after a quiet window. The scheduled
+# handler in worker/src/index.ts proxies an /internal/warm GET into the
+# container; this also exercises the pgvector connection pool so the
+# first real chat request after idle isn't slow.
+[triggers]
+crons = ["*/5 * * * *"]
+
 # ── Backend container ────────────────────────────────────────────────────────
 # Cloudflare Containers run the FastAPI app close to the edge. The Worker
 # (above) sits in front to validate Clerk JWTs, issue R2 presigned PUTs, and
