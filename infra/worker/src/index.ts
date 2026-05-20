@@ -12,6 +12,7 @@
  */
 
 import { AwsClient } from 'aws4fetch';
+import { Container } from '@cloudflare/containers';
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 
 export interface Env {
@@ -46,7 +47,18 @@ async function verifyClerk(req: Request, env: Env): Promise<JWTPayload | null> {
       issuer: env.CLERK_ISSUER,
     });
     return payload;
-  } catch {
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // Decode header + claims unverified for diagnostics (NOT for trust).
+    let preview = '';
+    try {
+      const parts = token.split('.');
+      if (parts.length === 3) {
+        const claims = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+        preview = `iss=${claims.iss} aud=${claims.aud} azp=${claims.azp} exp=${claims.exp}`;
+      }
+    } catch {}
+    console.error(`verifyClerk failed: ${msg} | ${preview} | CLERK_ISSUER=${env.CLERK_ISSUER}`);
     return null;
   }
 }
@@ -133,16 +145,8 @@ async function proxyToBackend(
   return stub.fetch(forwarded);
 }
 
-// Minimal Durable Object wrapping the Container endpoint. The Container Image
-// is configured in wrangler.toml; this DO just routes to the container instance.
-export class LawgptBackend {
-  constructor(private state: DurableObjectState, _env: Env) {}
-
-  async fetch(req: Request): Promise<Response> {
-    const container = (this.state as unknown as { container?: { fetch: typeof fetch } }).container;
-    if (!container) {
-      return new Response('container binding not initialised', { status: 503 });
-    }
-    return container.fetch(req);
-  }
+// Durable Object backed by a Cloudflare Container running FastAPI on port 8000.
+export class LawgptBackend extends Container<Env> {
+  defaultPort = 8000;
+  sleepAfter = '10m';
 }

@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@cloudflare/containers": "^0.3.4",
     "aws4fetch": "^1.0.20",
     "jose": "^5.9.6"
   },

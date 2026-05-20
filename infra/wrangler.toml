@@ -10,8 +10,8 @@ compatibility_flags = ["nodejs_compat"]
 
 [[containers]]
 class_name = "LawgptBackend"
-image = "./Containerfile"
-instance_type = "standard"
+image = "../backend/Containerfile"
+instance_type = "standard-1"
 max_instances = 5
 
 # ── R2 bucket (raw uploads) ──────────────────────────────────────────────────
@@ -20,18 +20,16 @@ max_instances = 5
 binding = "UPLOADS"
 bucket_name = "lawgpt-uploads"
 
-# ── Vectorize (per-user namespaces) ──────────────────────────────────────────
-
-[[vectorize]]
-binding = "VECTORS"
-index_name = "lawgpt-vectors"
+# ── Vectors: external Postgres + pgvector (Neon) ────────────────────────────
+# Zembed embeddings are 2560-dim; Cloudflare Vectorize caps at 1536, so we
+# use Postgres + pgvector via DATABASE_URL secret instead.
 
 # ── D1 (relational metadata: users, files, sessions, messages, exams) ────────
 
 [[d1_databases]]
 binding = "DB"
 database_name = "lawgpt-prod"
-database_id = "REPLACE_WITH_OUTPUT_OF_wrangler_d1_create"
+database_id = "02f7936a-d1f7-44bc-8b2e-0488dcdc1ecb"
 
 # ── Durable Object that wraps the container instance ─────────────────────────
 
@@ -41,16 +39,22 @@ class_name = "LawgptBackend"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["LawgptBackend"]
+new_sqlite_classes = ["LawgptBackend"]
 
 # ── Public-facing vars (non-secret) ──────────────────────────────────────────
 
 [vars]
-CLERK_ISSUER = "https://CHANGE-ME.clerk.accounts.dev"
+CLERK_ISSUER = "https://solid-fly-14.clerk.accounts.dev"
+CORS_ORIGINS = "https://lawgpt-15s.pages.dev,http://localhost:3000"
+R2_BUCKET = "lawgpt-uploads"
+R2_ACCOUNT_ID = "b7fc20f146b05722922360bd1310aa3a"
 
-# Secrets (set via `wrangler secret put`):
+# Secrets (set via `wrangler secret put` — never commit values):
+#   DATABASE_URL       Neon Postgres connection string
 #   CLERK_SECRET_KEY
 #   OPENAI_API_KEY
 #   GOOGLE_API_KEY
 #   ZEMBED_API_KEY
 #   COHERE_API_KEY
+#   R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY (Worker presign)
+#   R2_ACCESS_KEY / R2_SECRET_KEY (backend boto3 alt names)
