@@ -127,3 +127,73 @@ async def test_invalidate_user_drops_only_user(env):
     assert n == 1
     assert (await get(make_cache_key("alice", "q", []))) is None
     assert (await get(make_cache_key("bob", "q", []))) is not None
+
+
+def test_cache_check_node_short_circuits_on_hit(env, monkeypatch):
+    """A pre-seeded cache entry must populate state.final_answer and skip
+    every downstream LLM call (no router/synthesis/verification fires)."""
+    import asyncio
+
+    from src.agent import nodes
+    from src.agent.cache import make_cache_key, put
+
+    user_id = "usr_test"
+    query = "What is adverse possession?"
+    retrieved_texts = [
+        {"source": "readings_w3.md", "content": "x" * 100, "week": "week_3", "doc_type": "reading"}
+    ]
+    retrieved_slides = []
+    chunk_ids = [d["source"] for d in retrieved_texts]
+    key = make_cache_key(user_id, query, chunk_ids)
+    asyncio.run(
+        put(
+            key,
+            user_id,
+            "CACHED ANSWER",
+            {"intent": "ratio", "verification_report": {"confidence_score": 0.9}},
+        )
+    )
+
+    # If any LLM dispatch fires below, the test fails loudly.
+    def boom(*a, **kw):
+        raise AssertionError("LLM must not be called on cache hit")
+
+    monkeypatch.setattr(nodes, "llm_call", boom)
+
+    state = {
+        "query": query,
+        "user_id": user_id,
+        "retrieved_texts": retrieved_texts,
+        "retrieved_slides": retrieved_slides,
+        "intent": "ratio",  # cache_check runs after retrieval; router already set this
+    }
+    delta = nodes.cache_check_node(state)
+    assert delta["cache_hit"] is True
+    assert delta["final_answer"] == "CACHED ANSWER"
+    assert delta["intent"] == "ratio"
+    assert "cache_check" in delta["node_trace"]
+
+
+def test_cache_check_node_misses_when_chat_history_present(env):
+    """Multi-turn must bypass cache — follow-ups should always re-reason."""
+    import asyncio
+
+    from src.agent import nodes
+    from src.agent.cache import make_cache_key, put
+
+    user_id = "usr_test"
+    query = "And what about that case?"
+    chunk_ids = ["src.md"]
+    key = make_cache_key(user_id, query, chunk_ids)
+    asyncio.run(put(key, user_id, "STALE", {}))
+
+    state = {
+        "query": query,
+        "user_id": user_id,
+        "retrieved_texts": [{"source": "src.md", "content": "y", "week": "", "doc_type": ""}],
+        "retrieved_slides": [],
+        "chat_history": [{"role": "user", "content": "Earlier turn"}],
+    }
+    delta = nodes.cache_check_node(state)
+    assert delta["cache_hit"] is False
+    assert "final_answer" not in delta

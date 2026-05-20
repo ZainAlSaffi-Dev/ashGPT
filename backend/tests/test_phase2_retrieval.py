@@ -244,7 +244,7 @@ class TestRetrieveWithRerankerHook:
                 return []
 
         with patch.object(tools, "_get_vectorstore", return_value=FakeStore()):
-            with patch.object(tools, "_maybe_rerank", side_effect=lambda q, d, top_k, use_reranker: d) as mr:
+            with patch.object(tools, "_maybe_rerank", side_effect=lambda q, d, top_k, use_reranker, timings=None: d) as mr:
                 tools.retrieve_texts("q", k=8, use_reranker=False)
                 # k passed to MMR should equal user-requested k (no over-fetch)
                 assert recorded["k"] == 8
@@ -269,7 +269,7 @@ class TestRetrieveWithRerankerHook:
                 return []
 
         with patch.object(tools, "_get_vectorstore", return_value=FakeStore()):
-            with patch.object(tools, "_maybe_rerank", side_effect=lambda q, d, top_k, use_reranker: d[:top_k]) as mr:
+            with patch.object(tools, "_maybe_rerank", side_effect=lambda q, d, top_k, use_reranker, timings=None: d[:top_k]) as mr:
                 tools.retrieve_texts("q", k=8, use_reranker=True)
                 assert recorded["k"] == RERANKER_FETCH_K_TEXT
                 mr.assert_called_once()

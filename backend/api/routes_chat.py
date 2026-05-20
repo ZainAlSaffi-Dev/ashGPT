@@ -124,6 +124,8 @@ async def chat(
                 yield _sse("mermaid", {"diagram": result["mermaid_diagram"]})
             if result.get("verification_report"):
                 yield _sse("verification", {"report": result["verification_report"]})
+            if result.get("timings"):
+                yield _sse("timings", {"timings": result["timings"]})
 
             final = result.get("final_answer", "")
             yield _sse("answer_chunk", {"text": final})

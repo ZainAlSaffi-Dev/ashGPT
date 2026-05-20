@@ -71,3 +71,5 @@ class AgentState(TypedDict, total=False):
 
     # ── Diagnostics (for evaluation / ablation) ────────────────────────────
     node_trace: list[str]
+    timings: list[dict]  # [{"node": str, "ms": float, "sub": dict | None}]
+    cache_hit: bool      # True when run_query short-circuited from semantic cache

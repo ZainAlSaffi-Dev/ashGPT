@@ -1,32 +1,27 @@
-"""Evaluation and ablation framework for the Property Law Exam Assistant.
+"""Slim evaluation suite for the current LawGPT implementation.
 
-Compares the full agent pipeline against:
-  1. A plain LLM baseline (no retrieval, no graph nodes)
-  2. Mega-prompt ablation (retrieval + single consolidated LLM call replacing all nodes)
+Focus: validate the production retrieval + reranker + agent pipeline. The
+prior assignment-era suite ran four configs (full agent, baseline, mega-
+prompt ablation, no-reranker ablation) over 22 cases with ~20 plots. This
+revision drops the ablations and reduces the case set, keeping the metrics
+that still matter:
 
-Eval cases are defined in ``EVAL_CASES``: each has a **query_family** tag
-(`factual_retrieval`, `cross_modal_retrieval`, `analytical_synthesis`,
-`conversational_followup`) so reports satisfy explicit per-family testing.
-Multi-turn cases run the agent (and ablation) sequentially with memory; the
-baseline always sees only the **final** user turn.
+  * **Per-case agent quality** — groundedness (two-stage judge), answer
+    relevancy, context precision + MRR + Hit@K + NDCG@K, structural checks
+    (Mermaid validity for chronology, IRAC compliance for ratio), per-node
+    latency, source diversity.
+  * **Retrieval mode comparison (the headline lift)** — for each query,
+    run retrieval-only in four modes:
+        dense_only_no_rerank, dense_only_rerank,
+        hybrid_no_rerank, hybrid_rerank
+    score each with the context-precision judge and compare. This is the
+    direct measurement of the hybrid-BM25 + Cohere-rerank investment.
 
-Metrics collected per run:
-  - Groundedness score (LLM-as-a-judge: 1-5 scale)
-  - Answer relevancy (LLM-as-a-judge: 1-5 scale)
-  - Context precision@K, MRR, Hit@K, NDCG@K (LLM-judged, binary relevance)
-  - Optional recall-vs-pool (``--retrieval-pool-eval``): expanded retrieve + judge
-  - Source diversity (unique sources retrieved)
-  - Total latency (seconds)
-  - Per-node latency breakdown (for full agent)
-  - Node trace (which nodes fired)
-  - Cross-modal retrieval diagnostics on slide-targeted cases
+Run:
 
-Results are exported as JSON and plots as PNG for the report.
-
-Usage:
-    python -m src.eval.run_evals
     python -m src.eval.run_evals --output-dir eval_results
-    python -m src.eval.run_evals --retrieval-pool-eval   # optional recall-vs-pool (slow)
+    python -m src.eval.run_evals --skip-retrieval-modes      # agent only
+    python -m src.eval.run_evals --skip-agent                # retrieval only
 """
 
 from __future__ import annotations
@@ -35,107 +30,41 @@ import argparse
 import json
 import logging
 import math
+import random
 import re
 import time
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import TypedDict
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
 from src.agent.chat_memory import prepare_chat_history_for_run
-from src.agent.nodes import (
-    _format_context,
-    chronology_node,
-    mega_prompt_node,
-    ratio_extractor_node,
-    retrieval_node,
-    router_node,
-    synthesis_node,
-    verification_node,
-)
-from src.agent.state import AgentState
+from src.agent.graph import run_query
 from src.agent.tools import retrieve_all
-from src.config import (
-    BASELINE_MODEL,
-    EVAL_RETRIEVAL_POOL_K_SLIDES,
-    EVAL_RETRIEVAL_POOL_K_TEXT,
-    JUDGE_CRITIQUE_MODEL,
-    JUDGE_DRAFT_MODEL,
-    USE_VERIFICATION,
+from src.config import JUDGE_CRITIQUE_MODEL, JUDGE_DRAFT_MODEL
+from src.llm import (
+    get_token_usage,
+    llm_call,
+    reset_token_usage,
 )
-from src.llm import get_token_usage, llm_call, reset_token_usage
 
 load_dotenv()
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(message)s",
-    datefmt="%H:%M:%S",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
 
 
-# ── Query families (assignment-style explicit coverage) ─────────────────────────
-#
-# Each eval case is tagged with exactly one family so reports can show per-family
-# success/failure. Families mirror the coursework rubric: factual retrieval,
-# cross-modal retrieval (text + indexed slide descriptions), analytical synthesis,
-# and conversational follow-up (multi-turn with session memory).
-
-QueryFamily = Literal[
-    "factual_retrieval",
-    "cross_modal_retrieval",
-    "analytical_synthesis",
-    "conversational_followup",
-]
-
-
-QUERY_FAMILY_DESCRIPTIONS: dict[str, str] = {
-    "factual_retrieval": (
-        "Direct retrieval of stored knowledge: doctrine, tests, and definitions "
-        "that should appear verbatim or paraphrased from a small number of chunks."
-    ),
-    "cross_modal_retrieval": (
-        "Requires the lecture-slide channel: questions are phrased to target "
-        "VLM-indexed slide descriptions alongside PDF readings (multimodal KB)."
-    ),
-    "analytical_synthesis": (
-        "Multi-evidence answers: compare, relate, summarise across concepts, or "
-        "reconstruct sequences using several retrieved sources."
-    ),
-    "conversational_followup": (
-        "Multi-turn: first user message establishes topic; second message is a "
-        "follow-up resolved using chat_history (baseline sees only the last turn)."
-    ),
-}
+# ── Eval cases (slim, 10 across four query families) ─────────────────────────
 
 
 class EvalCase(TypedDict):
-    """One evaluation scenario with explicit family tagging."""
-
     case_id: str
-    query_family: QueryFamily
+    query_family: str
     rationale: str
     user_turns: list[str]
 
 
-def _eval_case_last_turn(case: EvalCase) -> str:
-    return case["user_turns"][-1]
-
-
 EVAL_CASES: list[EvalCase] = [
-    # ── Factual retrieval (direct KB lookup) ───────────────────────────────
-    {
-        "case_id": "fact_moran_test",
-        "query_family": "factual_retrieval",
-        "rationale": "Named case test — should retrieve specific ratio/test from readings.",
-        "user_turns": [
-            "What is the legal test from Buckinghamshire County Council v Moran?",
-        ],
-    },
+    # Factual retrieval (2)
     {
         "case_id": "fact_fee_simple",
         "query_family": "factual_retrieval",
@@ -143,440 +72,216 @@ EVAL_CASES: list[EvalCase] = [
         "user_turns": ["What is a fee simple estate?"],
     },
     {
-        "case_id": "fact_bailment_ratio",
+        "case_id": "fact_moran_test",
         "query_family": "factual_retrieval",
-        "rationale": "Ratio-style question tied to course materials on bailment.",
-        "user_turns": ["What is the ratio decidendi regarding bailment at will?"],
+        "rationale": "Named-case lookup — should retrieve specific ratio/test.",
+        "user_turns": ["What is the legal test from Buckinghamshire County Council v Moran?"],
     },
-    {
-        "case_id": "fact_perry_possessory",
-        "query_family": "factual_retrieval",
-        "rationale": "Named case holding from indexed readings.",
-        "user_turns": [
-            "What is the ratio in Perry v Clissold regarding possessory title?",
-        ],
-    },
-    # ── Cross-modal retrieval (slide / lecture description channel) ─────────
+    # Cross-modal (2)
     {
         "case_id": "xmodal_chattels_slides",
         "query_family": "cross_modal_retrieval",
-        "rationale": "Forces reliance on VLM-described lecture slides for chattels possession.",
+        "rationale": "Forces reliance on VLM-described lecture slides for chattels.",
         "user_turns": [
-            "According to the indexed lecture slide materials in the knowledge base, "
-            "what two elements are required to establish possession of chattels?",
-        ],
-    },
-    {
-        "case_id": "xmodal_moukataff_slide",
-        "query_family": "cross_modal_retrieval",
-        "rationale": "Slide-anchored case (Moukataff) should appear in slide descriptions.",
-        "user_turns": [
-            "What does the indexed lecture content describe about Moukataff v BOAC "
-            "and baggage or chattel possession?",
-        ],
-    },
-    {
-        "case_id": "xmodal_ap_slides",
-        "query_family": "cross_modal_retrieval",
-        "rationale": "Asks for emphasis from slide-indexed adverse possession teaching.",
-        "user_turns": [
-            "Based on the VLM-described lecture slides on adverse possession in the "
-            "knowledge base, what sequence or steps do those materials emphasise?",
-        ],
-    },
-    # ── Analytical / multi-hop synthesis ────────────────────────────────────
-    {
-        "case_id": "anal_ap_elements",
-        "query_family": "analytical_synthesis",
-        "rationale": "Must relate factual possession and animus across sources.",
-        "user_turns": [
-            "Explain the relationship between factual possession and animus possidendi "
-            "for adverse possession, using evidence from multiple parts of the course "
-            "readings and notes.",
-        ],
-    },
-    {
-        "case_id": "anal_lease_licence",
-        "query_family": "analytical_synthesis",
-        "rationale": "Compare two institutions from materials (distinction test).",
-        "user_turns": [
-            "What legal principle governs the distinction between a lease and a licence, "
-            "and how does each concept apply in outline?",
-        ],
-    },
-    {
-        "case_id": "anal_chronology_ap",
-        "query_family": "analytical_synthesis",
-        "rationale": "Chronological reconstruction across multiple factual beats.",
-        "user_turns": [
-            "Show the chronological sequence of how adverse possession is established "
-            "under the materials we indexed.",
-        ],
-    },
-    {
-        "case_id": "anal_torrens_framework",
-        "query_family": "analytical_synthesis",
-        "rationale": "Framework summary spanning readings/slides on Torrens.",
-        "user_turns": [
-            "Summarise the legal framework for land registration under the Torrens "
-            "system as presented in the indexed course materials.",
-        ],
-    },
-    {
-        "case_id": "anal_taxonomy",
-        "query_family": "analytical_synthesis",
-        "rationale": "Taxonomy spans multiple categories (real vs personal property).",
-        "user_turns": [
-            "Summarise the key concepts of property law taxonomy including real and "
-            "personal property as covered in our sources.",
-        ],
-    },
-    # ── Conversational follow-up / personalised context (multi-turn) ───────
-    {
-        "case_id": "conv_ap_followup",
-        "query_family": "conversational_followup",
-        "rationale": "Second turn references 'that ratio' — needs session memory.",
-        "user_turns": [
-            "What is the ratio decidendi for adverse possession?",
-            "Give one short exam tip tailored to that ratio for an open-book exam.",
-        ],
-    },
-    {
-        "case_id": "conv_torrens_followup",
-        "query_family": "conversational_followup",
-        "rationale": "Contrast question after Torrens explanation — coreference to prior answer.",
-        "user_turns": [
-            "Explain the Torrens system of land registration.",
-            "In one paragraph, how does that differ from a deeds registry? Stay within "
-            "our indexed course sources only.",
-        ],
-    },
-    {
-        "case_id": "conv_chattels_found",
-        "query_family": "conversational_followup",
-        "rationale": "Hypothetical extension after test — requires prior topic + retrieval.",
-        "user_turns": [
-            "What is the legal test for establishing possession of chattels?",
-            "Does anything in our indexed materials suggest the answer changes if the "
-            "chattel was found on the ground rather than handed over? Explain briefly.",
-        ],
-    },
-    # ── Expansion (v2): seven additional cases for statistical power ──────────
-    {
-        "case_id": "fact_fee_tail_vs_simple",
-        "query_family": "factual_retrieval",
-        "rationale": "Comparative doctrine question — should retrieve estate-type readings.",
-        "user_turns": [
-            "What is the difference between a fee tail and a fee simple in our materials?",
-        ],
-    },
-    {
-        "case_id": "fact_pla_chattels",
-        "query_family": "factual_retrieval",
-        "rationale": "Statute lookup — Property Law Act 1974 (Qld) on chattels.",
-        "user_turns": [
-            "What does the Property Law Act 1974 (Qld) say about chattels in the readings?",
+            "According to the indexed lecture slide materials, what two elements are "
+            "required to establish possession of chattels?",
         ],
     },
     {
         "case_id": "xmodal_torrens_indefeasibility",
         "query_family": "cross_modal_retrieval",
-        "rationale": "Targets lecture slides on Torrens indefeasibility — VLM-described content.",
+        "rationale": "Targets lecture slides on Torrens indefeasibility.",
         "user_turns": [
             "Looking at the indexed lecture slides on the Torrens system, how do those "
             "materials present the doctrine of indefeasibility of title?",
         ],
     },
+    # Analytical synthesis (3 — covers ratio, chronology, summary intents)
     {
-        "case_id": "xmodal_bailment_categories",
-        "query_family": "cross_modal_retrieval",
-        "rationale": "Slide-anchored taxonomy: bailment categories from lecture deck.",
-        "user_turns": [
-            "From the lecture slides indexed in the knowledge base, what categories "
-            "of bailment do those materials describe?",
-        ],
-    },
-    {
-        "case_id": "anal_legal_vs_equitable_interests",
+        "case_id": "anal_ap_elements",
         "query_family": "analytical_synthesis",
-        "rationale": "Comparison across multiple chunks of equitable vs legal interests.",
+        "rationale": "Ratio path: factual possession + animus.",
         "user_turns": [
-            "Using multiple chunks of the indexed sources, compare equitable interests "
-            "with legal interests in property: how do they arise, and how do they bind "
-            "third parties?",
+            "What is the ratio decidendi for adverse possession across the readings?",
         ],
     },
     {
-        "case_id": "anal_torrens_title_passing",
+        "case_id": "anal_chronology_ap",
         "query_family": "analytical_synthesis",
-        "rationale": "Sequenced reasoning: passage of legal title in a Torrens transfer.",
+        "rationale": "Chronology path: should trigger Mermaid output.",
         "user_turns": [
-            "Sequence the steps by which legal title passes in a Torrens-system land "
-            "transfer, citing the indexed course materials at each step.",
+            "Show the chronological sequence of how adverse possession is established.",
         ],
     },
     {
-        "case_id": "conv_lease_three_turn",
+        "case_id": "anal_torrens_framework",
+        "query_family": "analytical_synthesis",
+        "rationale": "Summary path: framework across readings + slides.",
+        "user_turns": [
+            "Summarise the legal framework for land registration under the Torrens system.",
+        ],
+    },
+    # Conversational follow-up (3)
+    {
+        "case_id": "conv_ap_followup",
         "query_family": "conversational_followup",
-        "rationale": "Three-turn case where the third turn references the second.",
+        "rationale": "Coreference: 'that ratio' resolves to turn-1.",
         "user_turns": [
-            "What are the essential characteristics of a lease in our indexed materials?",
-            "Now contrast a lease with a licence in one paragraph, again from the sources.",
-            "Which of those points you just made would change if the licence were "
-            "irrevocable? Stay within our indexed sources only.",
+            "What is the ratio decidendi for adverse possession?",
+            "Give one short exam tip tailored to that ratio.",
+        ],
+    },
+    {
+        "case_id": "conv_torrens_followup",
+        "query_family": "conversational_followup",
+        "rationale": "Contrast question after Torrens explanation.",
+        "user_turns": [
+            "Explain the Torrens system of land registration.",
+            "In one paragraph, how does that differ from a deeds registry?",
+        ],
+    },
+    {
+        "case_id": "conv_chattels_extension",
+        "query_family": "conversational_followup",
+        "rationale": "Hypothetical extension referencing prior topic.",
+        "user_turns": [
+            "What is the legal test for establishing possession of chattels?",
+            "Does our indexed material suggest the answer changes if the chattel was found "
+            "on the ground rather than handed over?",
         ],
     },
 ]
 
 
-# Backwards compatibility for imports / smoke tests
-TEST_QUERIES: list[str] = [_eval_case_last_turn(c) for c in EVAL_CASES]
+TEST_QUERIES: list[str] = [c["user_turns"][-1] for c in EVAL_CASES]
+
+
+def _eval_case_last_turn(case: EvalCase) -> str:
+    return case["user_turns"][-1]
 
 
 def _judge_question_for_case(case: EvalCase) -> str:
-    """Question text passed to relevancy/groundedness judges (context for follow-ups)."""
+    """For multi-turn cases the judge sees the full turn context."""
     turns = case["user_turns"]
     if len(turns) == 1:
         return turns[0]
-    prior = "\n".join(f"User (earlier): {t}" for t in turns[:-1])
+    history = "\n".join(f"  Student: {t}" for t in turns[:-1])
     return (
-        "Multi-turn evaluation. Score the final assistant answer in light of the "
-        "whole thread.\n\n"
-        f"{prior}\n\n"
-        f"Latest user message (primary focus): {turns[-1]}"
+        f"Multi-turn case.\n"
+        f"Prior turns:\n{history}\n"
+        f"Current question: {turns[-1]}"
     )
 
 
-def _cross_modal_signals(result: dict) -> dict:
-    """Diagnostics for cross-modal cases: did both text and slide chunks appear?"""
-    texts = result.get("retrieved_text_count", 0)
-    slides = result.get("retrieved_slide_count", 0)
-    modalities: list[str] = []
-    if texts > 0:
-        modalities.append("text_pdf")
-    if slides > 0:
-        modalities.append("slide_vlm")
-    return {
-        "retrieved_text_chunks": texts,
-        "retrieved_slide_chunks": slides,
-        "modalities_present": modalities,
-        "both_modalities_retrieved": texts > 0 and slides > 0,
-    }
-
-
-def _run_agent_turns_for_eval(
-    case: EvalCase,
-    week: str | None = None,
-    use_reranker: bool | None = None,
-) -> dict:
-    """Run the full agent for each user turn; return metrics dict for the final turn."""
-    history: list[dict[str, str]] = []
-    last: dict = {}
-    for turn in case["user_turns"]:
-        prior = prepare_chat_history_for_run(history) if history else None
-        last = run_agent_with_metrics(
-            turn,
-            week=week,
-            chat_history=prior,
-            use_reranker=use_reranker,
-        )
-        history.append({"role": "user", "content": turn})
-        history.append({"role": "assistant", "content": last.get("answer", "")})
-    last["conversation_turns"] = list(case["user_turns"])
-    return last
-
-
-def _run_ablation_turns_for_eval(case: EvalCase, week: str | None = None) -> dict:
-    history: list[dict[str, str]] = []
-    last: dict = {}
-    for turn in case["user_turns"]:
-        prior = prepare_chat_history_for_run(history) if history else None
-        last = run_ablation_mega_prompt(turn, week=week, chat_history=prior)
-        history.append({"role": "user", "content": turn})
-        history.append({"role": "assistant", "content": last.get("answer", "")})
-    last["conversation_turns"] = list(case["user_turns"])
-    return last
-
-
-# ── LLM Judge Helpers ─────────────────────────────────────────────────────────
+# ── LLM judge helpers ────────────────────────────────────────────────────────
 
 
 def _judge_call(prompt: str, system: str, model: str | None = None) -> dict:
-    """Make a judge LLM call and parse the JSON response."""
-    response = llm_call(
-        prompt,
-        model=model or JUDGE_DRAFT_MODEL,
-        system_instruction=system,
-        temperature=0.0,
-    )
     try:
-        cleaned = re.sub(r"```json\s*|\s*```", "", response).strip()
+        response = llm_call(
+            prompt, model=model or JUDGE_DRAFT_MODEL, system_instruction=system, temperature=0.0
+        )
+    except Exception as e:
+        log.warning("Judge call failed: %s", e)
+        return {}
+    cleaned = re.sub(r"```json\s*|\s*```", "", response or "").strip()
+    try:
         return json.loads(cleaned)
-    except (json.JSONDecodeError, KeyError, ValueError):
+    except (json.JSONDecodeError, ValueError):
         log.warning("Judge parse failed for prompt: %s...", prompt[:80])
         return {}
 
 
-# ── Groundedness Judge ─────────────────────────────────────────────────────────
-
 JUDGE_GROUNDEDNESS_SYSTEM = (
-    "You are an impartial evaluator assessing the groundedness of an AI answer. "
-    "You will be given:\n"
-    "1. The original question.\n"
-    "2. The source material that was available to the AI.\n"
-    "3. The AI-generated answer.\n\n"
-    "Score the answer on a scale of 1 to 5:\n"
-    "  5 = Fully grounded: every factual claim (cases, dates, statutes, legal "
-    "tests) is supported by the source material.\n"
-    "  4 = Mostly grounded: core claims are supported, minor unsupported details.\n"
-    "  3 = Partially grounded: some claims supported, some not in the sources.\n"
-    "  2 = Mostly ungrounded: significant claims not traceable to the sources.\n"
-    "  1 = Ungrounded: answer contradicts or largely ignores the source material.\n\n"
-    "Note: The AI is allowed to PARAPHRASE and EXPLAIN concepts in plain English. "
-    "Only penalise for introducing factual claims (case names, dates, statutes, "
-    "legal holdings) that do not appear in the sources.\n\n"
-    "Respond with ONLY a JSON object: {\"score\": <int>, \"reasoning\": \"<brief explanation>\"}"
+    "You are an impartial evaluator assessing groundedness of an AI answer. "
+    "Score 1–5: 5 = fully grounded (every factual claim — cases, dates, statutes, "
+    "legal tests — supported by sources); 4 = mostly grounded with minor unsupported "
+    "details; 3 = partially grounded; 2 = mostly ungrounded; 1 = contradicts/ignores "
+    "sources. Paraphrasing and plain-English explanations are ALLOWED. Only penalise "
+    "invented factual claims.\n\n"
+    'Respond with JSON only: {"score": <int>, "reasoning": "<brief>"}'
 )
 
 
 JUDGE_CRITIQUE_SYSTEM = (
-    "You are a senior evaluator reviewing a junior judge's assessment of an AI answer. "
-    "You will be given:\n"
-    "1. The original question.\n"
-    "2. The source material.\n"
-    "3. The AI answer being evaluated.\n"
-    "4. The junior judge's initial score and reasoning.\n\n"
-    "Your job: critically review the junior judge's assessment. Either:\n"
-    "- AGREE with the score if the reasoning is sound, or\n"
-    "- OVERRIDE with a corrected score if the junior judge was too lenient or too harsh.\n\n"
-    "Remember: paraphrasing and plain-English explanations are ALLOWED. "
-    "Only penalise for invented factual claims (case names, dates, statutes, holdings).\n\n"
-    "Respond with ONLY a JSON object: "
-    "{\"score\": <int 1-5>, \"reasoning\": \"<your assessment>\", \"agreed_with_draft\": <bool>}"
+    "You are a senior evaluator reviewing a junior judge's assessment. Agree or "
+    "override with a corrected score (1–5). Paraphrasing is allowed; penalise only "
+    "invented factual claims.\n\n"
+    'Respond with JSON only: '
+    '{"score": <int 1-5>, "reasoning": "<your assessment>", "agreed_with_draft": <bool>}'
 )
 
 
 def judge_groundedness(query: str, context: str, answer: str) -> dict:
-    """Two-stage judge: draft model scores, critique model reviews and finalises."""
-    base_prompt = (
-        f"QUESTION: {query}\n\n"
-        f"SOURCE MATERIAL:\n{context}\n\n"
-        f"AI ANSWER:\n{answer}\n\n"
-    )
-
-    # Stage 1: Draft judgment
+    """Two-stage judge (draft + critique) for cross-provider robustness."""
+    base = f"QUESTION: {query}\n\nSOURCE MATERIAL:\n{context}\n\nAI ANSWER:\n{answer}\n\n"
     draft = _judge_call(
-        base_prompt + "Evaluate the groundedness of this answer.",
+        base + "Evaluate the groundedness of this answer.",
         JUDGE_GROUNDEDNESS_SYSTEM,
         model=JUDGE_DRAFT_MODEL,
     )
     draft_score = int(draft.get("score", 3))
-    draft_reasoning = draft.get("reasoning", "No reasoning provided")
-
-    # Stage 2: Critique judgment
-    critique_prompt = (
-        base_prompt
-        + f"JUNIOR JUDGE ASSESSMENT:\n"
-        f"  Score: {draft_score}/5\n"
-        f"  Reasoning: {draft_reasoning}\n\n"
-        "Review this assessment. Agree or override with a corrected score."
-    )
+    draft_reasoning = draft.get("reasoning", "No reasoning")
     critique = _judge_call(
-        critique_prompt,
+        base
+        + f"JUNIOR JUDGE ASSESSMENT:\n  Score: {draft_score}/5\n  Reasoning: {draft_reasoning}\n\n"
+        "Review and agree or override.",
         JUDGE_CRITIQUE_SYSTEM,
         model=JUDGE_CRITIQUE_MODEL,
     )
-
-    final_score = int(critique.get("score", draft_score))
-    agreed = critique.get("agreed_with_draft", True)
-
     return {
-        "score": final_score,
+        "score": int(critique.get("score", draft_score)),
         "reasoning": critique.get("reasoning", draft_reasoning),
         "draft_score": draft_score,
-        "draft_reasoning": draft_reasoning,
-        "agreed_with_draft": agreed,
+        "agreed_with_draft": critique.get("agreed_with_draft", True),
     }
 
 
-# ── Answer Relevancy Judge ────────────────────────────────────────────────────
-
 JUDGE_RELEVANCY_SYSTEM = (
-    "You are an impartial evaluator assessing whether an AI answer is relevant "
-    "to the student's question.\n\n"
-    "Score the answer on a scale of 1 to 5:\n"
-    "  5 = Perfectly relevant: directly and completely addresses the question.\n"
-    "  4 = Mostly relevant: addresses the core question with minor tangents.\n"
-    "  3 = Partially relevant: some parts address the question, others drift.\n"
-    "  2 = Mostly irrelevant: answer is largely off-topic.\n"
-    "  1 = Irrelevant: answer does not address the question at all.\n\n"
-    "Respond with ONLY a JSON object: {\"score\": <int>, \"reasoning\": \"<brief explanation>\"}"
+    "Assess whether an AI answer is relevant to the student's question. Score 1–5: "
+    "5 = directly and completely addresses the question; 1 = does not address it.\n\n"
+    'Respond with JSON only: {"score": <int>, "reasoning": "<brief>"}'
 )
 
 
 def judge_answer_relevancy(query: str, answer: str) -> dict:
-    """Use the LLM as a judge to score answer relevancy."""
-    prompt = (
-        f"QUESTION: {query}\n\n"
-        f"AI ANSWER:\n{answer}\n\n"
-        "Evaluate how relevant this answer is to the question."
+    result = _judge_call(
+        f"QUESTION: {query}\n\nAI ANSWER:\n{answer}\n\nEvaluate relevancy.",
+        JUDGE_RELEVANCY_SYSTEM,
     )
-    result = _judge_call(prompt, JUDGE_RELEVANCY_SYSTEM)
     return {
         "score": int(result.get("score", 3)),
         "reasoning": result.get("reasoning", "Parse error"),
     }
 
 
-# ── Context Precision Judge ───────────────────────────────────────────────────
+JUDGE_CONTEXT_PRECISION_SYSTEM = (
+    "Is this retrieved chunk relevant to the question? A chunk is relevant if it "
+    "contains information that helps answer the question.\n\n"
+    'Respond with JSON only: {"relevant": <true|false>, "reasoning": "<brief>"}'
+)
 
 
-def _ranking_metrics_from_binary_verdicts(verdicts: list[bool]) -> dict[str, float | int]:
-    """MRR, Hit@K, and NDCG@K from LLM relevance verdicts in ranked order.
-
-    Interprets ``verdicts[i]`` as relevance of the chunk at rank ``i+1`` (production
-    retrieval order: texts then slides, as returned by the agent).
-    """
+def _ranking_metrics_from_binary_verdicts(verdicts: list[bool]) -> dict:
+    """MRR + Hit@K + NDCG@K from ranked-order binary relevance verdicts."""
     k = len(verdicts)
     if k == 0:
         return {"mrr": 0.0, "hit_at_k": 0.0, "ndcg_at_k": 0.0, "k": 0}
-
     mrr = 0.0
     for i, v in enumerate(verdicts):
         if v:
             mrr = 1.0 / (i + 1)
             break
-
-    hit_at_k = 1.0 if any(verdicts) else 0.0
-
+    hit = 1.0 if any(verdicts) else 0.0
     dcg = sum((1.0 if v else 0.0) / math.log2(i + 2) for i, v in enumerate(verdicts))
-    rel_count = int(sum(1 for v in verdicts if v))
+    rel_count = sum(verdicts)
     idcg = sum(1.0 / math.log2(i + 2) for i in range(min(rel_count, k)))
-    ndcg_at_k = (dcg / idcg) if idcg > 0 else 0.0
-
-    return {
-        "mrr": round(mrr, 3),
-        "hit_at_k": hit_at_k,
-        "ndcg_at_k": round(ndcg_at_k, 3),
-        "k": k,
-    }
-
-
-JUDGE_CONTEXT_PRECISION_SYSTEM = (
-    "You are an impartial evaluator assessing retrieval quality. "
-    "You will be given a question and a single retrieved text chunk.\n\n"
-    "Determine whether this chunk is RELEVANT to answering the question.\n"
-    "A chunk is relevant if it contains information that would help answer "
-    "the question — even partially.\n\n"
-    "Respond with ONLY a JSON object: {\"relevant\": true} or {\"relevant\": false}"
-)
+    ndcg = (dcg / idcg) if idcg > 0 else 0.0
+    return {"mrr": round(mrr, 3), "hit_at_k": hit, "ndcg_at_k": round(ndcg, 3), "k": k}
 
 
 def judge_context_precision(query: str, chunks: list[dict]) -> dict:
-    """Judge each retrieved chunk for relevance.
-
-    Returns precision@K, MRR, Hit@K, NDCG@K (binary labels), and per-chunk verdicts.
-    """
+    """Judge each chunk for relevance → precision@k + ranking metrics."""
     if not chunks:
         return {
             "precision_at_k": 0.0,
@@ -585,1503 +290,413 @@ def judge_context_precision(query: str, chunks: list[dict]) -> dict:
             "verdicts": [],
             **_ranking_metrics_from_binary_verdicts([]),
         }
-
     verdicts: list[bool] = []
     for chunk in chunks:
         prompt = (
             f"QUESTION: {query}\n\n"
             f"RETRIEVED CHUNK (from {chunk.get('source', 'unknown')}):\n"
             f"{chunk.get('content', '')[:1500]}\n\n"
-            "Is this chunk relevant to the question?"
+            "Is this chunk relevant?"
         )
-        result = _judge_call(prompt, JUDGE_CONTEXT_PRECISION_SYSTEM)
-        verdicts.append(bool(result.get("relevant", False)))
-
-    relevant_count = sum(verdicts)
-    ranking = _ranking_metrics_from_binary_verdicts(verdicts)
+        out = _judge_call(prompt, JUDGE_CONTEXT_PRECISION_SYSTEM)
+        verdicts.append(bool(out.get("relevant", False)))
+    rel = sum(verdicts)
     return {
-        "precision_at_k": round(relevant_count / len(chunks), 2),
-        "relevant_count": relevant_count,
+        "precision_at_k": round(rel / len(chunks), 3),
+        "relevant_count": rel,
         "total_count": len(chunks),
         "verdicts": verdicts,
-        **ranking,
+        **_ranking_metrics_from_binary_verdicts(verdicts),
     }
 
 
-def judge_context_precision_with_pool(
-    query: str,
-    *,
-    week: str | None = None,
-    k_text_prod: int = 8,
-    k_slide_prod: int = 4,
-    k_text_pool: int = EVAL_RETRIEVAL_POOL_K_TEXT,
-    k_slide_pool: int = EVAL_RETRIEVAL_POOL_K_SLIDES,
-) -> dict:
-    """LLM-judge a **deep** retrieval pool, then score production slice + recall estimate.
-
-    **Recall vs pool:** ``relevant_in_production / max(relevant_in_pool, 1)`` — treats
-    all judge-positive chunks in the pool as a proxy for the relevant set. This is
-    **not** corpus-wide recall (no human qrels); document that limitation in the report.
-
-    Ranking metrics (MRR, NDCG, Hit) use **production** ordering (first *k_text_prod*
-    text chunks + first *k_slide_prod* slides from the same ranked lists).
-    """
-    texts, slides = retrieve_all(
-        query,
-        week=week,
-        k_text=k_text_pool,
-        k_slides=k_slide_pool,
-    )
-    pool_chunks = list(texts) + list(slides)
-    base = judge_context_precision(query, pool_chunks)
-    verdicts: list[bool] = base["verdicts"]
-    n_t = len(texts)
-    n_s = len(slides)
-    prod_indices = list(range(min(k_text_prod, n_t))) + list(
-        range(n_t, n_t + min(k_slide_prod, n_s))
-    )
-    prod_verdicts = [verdicts[i] for i in prod_indices if i < len(verdicts)]
-    rel_prod = sum(prod_verdicts)
-    total_rel_pool = sum(verdicts)
-    recall_vs_pool: float | None = None
-    if total_rel_pool > 0:
-        recall_vs_pool = round(rel_prod / total_rel_pool, 3)
-
-    rank_prod = _ranking_metrics_from_binary_verdicts(prod_verdicts)
-
-    return {
-        "precision_at_k": round(rel_prod / max(len(prod_verdicts), 1), 2),
-        "relevant_count": int(rel_prod),
-        "total_count": len(prod_verdicts),
-        "verdicts": prod_verdicts,
-        **rank_prod,
-        "recall_vs_pool": recall_vs_pool,
-        "relevant_count_pool": int(total_rel_pool),
-        "pool_total_chunks": len(pool_chunks),
-        "pool_k_text": k_text_pool,
-        "pool_k_slides": k_slide_pool,
-        "eval_mode": "pool",
-    }
+# ── Structural checks (Mermaid + IRAC) ───────────────────────────────────────
 
 
-# ── Mermaid.js Validity ───────────────────────────────────────────────────────
-
-
-def _extract_mermaid_from_text(text: str) -> str:
-    """Return the first fenced ```mermaid block body, or empty string."""
+def _extract_mermaid(text: str) -> str:
     if not text:
         return ""
-    match = re.search(r"```mermaid\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    return match.group(1).strip() if match else ""
-
-
-def _mermaid_for_structural_metric(dedicated: str, final_answer: str) -> str:
-    """Prefer the chronology node's diagram; else any Mermaid embedded in the final answer."""
-    d = (dedicated or "").strip()
-    if d:
-        return d
-    return _extract_mermaid_from_text(final_answer or "")
-
-
-def _irac_for_structural_metric(dedicated: str, final_answer: str) -> str:
-    """Prefer the ratio extractor artefact; else the student-facing answer (ablation / baseline)."""
-    d = (dedicated or "").strip()
-    if d:
-        return d
-    return final_answer or ""
+    m = re.search(r"```mermaid\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    return m.group(1).strip() if m else ""
 
 
 def check_mermaid_validity(mermaid_code: str) -> dict:
-    """Check if the Mermaid diagram is structurally valid.
-
-    Validates: non-empty, has graph declaration, has nodes, has edges,
-    no reserved-word conflicts. Returns pass/fail with detail.
-    """
-    if not mermaid_code or not mermaid_code.strip():
-        return {"valid": False, "score": 0.0, "reason": "No Mermaid diagram produced"}
-
-    checks = {
-        "has_graph_declaration": bool(re.search(r"graph\s+(TD|LR|TB|BT|RL)", mermaid_code)),
-        "has_nodes": bool(re.search(r'\w+\[".+?"\]', mermaid_code) or re.search(r"\w+\[.+?\]", mermaid_code)),
-        "has_edges": bool(re.search(r"-->", mermaid_code)),
-        "min_3_nodes": len(re.findall(r'\w+\[', mermaid_code)) >= 3,
-        "no_empty_labels": not bool(re.search(r'\[\s*\]', mermaid_code)),
-    }
-
-    passed = sum(checks.values())
-    total = len(checks)
-    score = round(passed / total, 2)
-    failed = [k for k, v in checks.items() if not v]
-
+    """Lightweight syntactic check — confirms diagram header + at least one edge."""
+    code = (mermaid_code or "").strip()
+    if not code:
+        return {"score": 0.0, "reason": "empty"}
+    header_ok = bool(re.match(r"(flowchart|graph|sequenceDiagram|stateDiagram)", code))
+    edge_ok = bool(re.search(r"-->|---|==>|->>|-->>", code))
+    score = (0.5 if header_ok else 0.0) + (0.5 if edge_ok else 0.0)
     return {
-        "valid": passed == total,
-        "score": score,
-        "checks": checks,
-        "reason": f"Passed {passed}/{total}" + (f" — failed: {failed}" if failed else ""),
+        "score": round(score, 2),
+        "reason": "ok" if score == 1.0 else f"header={header_ok} edge={edge_ok}",
     }
-
-
-# ── IRAC Structural Compliance ───────────────────────────────────────────────
-
-
-# Intents for which IRAC structure is not expected.
-# - "chronology": the answer is a Mermaid timeline; IRAC headings would be noise.
-# - "general":    greetings / off-topic / non-legal — IRAC is not applicable.
-_IRAC_NA_INTENTS = {"chronology", "general"}
 
 
 def check_irac_compliance(irac_text: str, intent: str | None = None) -> dict:
-    """Check if the IRAC analysis contains all four required components.
-
-    Returns ``{"applicable": False, "score": None, ...}`` when the router's
-    intent is one of :data:`_IRAC_NA_INTENTS` — these queries are not
-    expected to produce an IRAC analysis, so a score of zero would unfairly
-    drag the average down. The summary computation excludes ``None`` scores
-    from the per-config IRAC average and reports a separate
-    ``irac_applicable_count`` for transparency.
-    """
-    if intent in _IRAC_NA_INTENTS:
-        return {
-            "compliant": None,
-            "score": None,
-            "applicable": False,
-            "components": {},
-            "reason": f"IRAC not applicable for intent={intent!r}",
-        }
-
-    if not irac_text or not irac_text.strip():
-        return {
-            "compliant": False,
-            "score": 0.0,
-            "applicable": True,
-            "components": {},
-            "reason": "No IRAC analysis produced",
-        }
-
-    components = {
-        "issue": bool(re.search(r"\b(issue|legal question)\b", irac_text, re.IGNORECASE)),
-        "rule": bool(re.search(r"\b(rule|ratio decidendi|legal (rule|principle|test))\b", irac_text, re.IGNORECASE)),
-        "application": bool(re.search(r"\bapplicat", irac_text, re.IGNORECASE)),
-        "conclusion": bool(re.search(r"\bconclus", irac_text, re.IGNORECASE)),
+    """Score 0–1 by IRAC heading presence. Only meaningful for ratio/summary intents."""
+    if intent not in (None, "ratio", "summary"):
+        return {"score": None, "reason": f"n/a for intent={intent}"}
+    if not irac_text:
+        return {"score": 0.0, "reason": "empty"}
+    text = irac_text.lower()
+    parts = {
+        "issue": "issue" in text,
+        "rule": "rule" in text,
+        "application": "application" in text or "analysis" in text,
+        "conclusion": "conclusion" in text,
     }
-
-    passed = sum(components.values())
-    total = len(components)
-    score = round(passed / total, 2)
-
-    return {
-        "compliant": passed == total,
-        "score": score,
-        "applicable": True,
-        "components": components,
-        "reason": f"IRAC {passed}/{total} components found",
-    }
+    score = sum(parts.values()) / 4
+    return {"score": round(score, 2), "parts": parts}
 
 
-# ── Timed node runner ─────────────────────────────────────────────────────────
+# ── Agent runner with per-node latencies ─────────────────────────────────────
 
 
-def _run_node(node_fn, state: AgentState) -> tuple[dict, float]:
-    """Run a node function and return (result_dict, elapsed_seconds)."""
+def _run_one_turn_with_timing(query: str, week: str | None, history: list[dict]) -> dict:
+    """Single-turn run capturing per-stage wall time. Uses run_query so the
+    production cache + escalation paths are exercised."""
+    reset_token_usage()
     start = time.time()
-    result = node_fn(state)
-    elapsed = time.time() - start
-    return result, round(elapsed, 2)
+    result = run_query(query=query, week_filter=week, chat_history=history)
+    latency = time.time() - start
+    usage = get_token_usage().summary()
 
-
-# ── Live verification counters (visible in INFO logs during a run) ────────────
-
-
-class _VerificationCounters:
-    """Module-scoped live counter for the verification node.
-
-    The eval logs a one-line ``[verification]`` summary after every case so
-    you can see hallucination interception in real time, e.g.:
-        [verification] case 7/22 fired=7 rewrites=2 unsupported_total=3
-    """
-
-    def __init__(self) -> None:
-        self.cases_seen = 0
-        self.fired = 0
-        self.rewrites_applied = 0
-        self.unsupported_total = 0
-
-    def record(self, case_index: int, total_cases: int, agent_result: dict) -> None:
-        self.cases_seen += 1
-        report = agent_result.get("verification_report") or {}
-        if "verification" in agent_result.get("node_trace", []):
-            self.fired += 1
-        if report.get("rewrites_applied"):
-            self.rewrites_applied += 1
-        self.unsupported_total += len(report.get("unsupported_claims", []) or [])
-
-        log.info(
-            "[verification] case %d/%d fired=%d rewrites=%d unsupported_total=%d",
-            case_index,
-            total_cases,
-            self.fired,
-            self.rewrites_applied,
-            self.unsupported_total,
-        )
-
-
-_verification_counters = _VerificationCounters()
-
-
-def get_verification_counters() -> _VerificationCounters:
-    """Expose the singleton for tests / external inspection."""
-    return _verification_counters
-
-
-# ── Full Agent Run with Per-Node Metrics ──────────────────────────────────────
-
-
-def run_agent_with_metrics(
-    query: str,
-    week: str | None = None,
-    chat_history: list[dict[str, str]] | None = None,
-    use_reranker: bool | None = None,
-) -> dict:
-    """Run the full agent pipeline with per-node latency tracking.
-
-    ``use_reranker`` overrides the global config (used for the
-    ``ablation_no_reranker`` configuration).
-    """
-    node_latencies: dict[str, float] = {}
-    total_start = time.time()
-
-    state: AgentState = {"query": query}
-    if week:
-        state["week_filter"] = week
-    if use_reranker is not None:
-        state["use_reranker"] = bool(use_reranker)
-    prepared = prepare_chat_history_for_run(chat_history)
-    if prepared:
-        state["chat_history"] = prepared
-
-    result, lat = _run_node(router_node, state)
-    state.update(result)
-    node_latencies["router"] = lat
-
-    result, lat = _run_node(retrieval_node, state)
-    state.update(result)
-    node_latencies["retrieval"] = lat
-
-    intent = state.get("intent", "general")
-
-    if intent in ("ratio", "summary"):
-        result, lat = _run_node(ratio_extractor_node, state)
-        state.update(result)
-        node_latencies["ratio_extractor"] = lat
-
-    if intent in ("chronology", "summary"):
-        result, lat = _run_node(chronology_node, state)
-        state.update(result)
-        node_latencies["chronology"] = lat
-
-    result, lat = _run_node(synthesis_node, state)
-    state.update(result)
-    node_latencies["synthesis"] = lat
-
-    # ── Verification (post-synthesis fact-check) ──────────────────────────────
-    # Mirrors the compiled graph: synthesis → verification → END. Without this
-    # call the eval would silently bypass the verification node — the compiled
-    # graph in graph.py still wires it, but ``run_agent_with_metrics`` builds
-    # its own pipeline for per-node latency tracking, so we must invoke it
-    # explicitly here.
-    if USE_VERIFICATION:
-        result, lat = _run_node(verification_node, state)
-        state.update(result)
-        node_latencies["verification"] = lat
-        report = state.get("verification_report") or {}
-        if report.get("rewrites_applied"):
-            log.info(
-                "VerificationNode: rewrote %d unsupported citation(s): %s",
-                len(report.get("unsupported_claims", []) or []),
-                report.get("unsupported_claims", []),
-            )
-
-    total_elapsed = round(time.time() - total_start, 2)
-
-    texts = state.get("retrieved_texts", [])
-    slides = state.get("retrieved_slides", [])
-    all_sources = set(d["source"] for d in texts + slides)
-    context = _format_context(state)
+    texts = result.get("retrieved_texts") or []
+    slides = result.get("retrieved_slides") or []
+    chunks = [*texts, *slides]
+    context = "\n\n".join((d.get("content", "") or "") for d in chunks)
 
     return {
-        "answer": state.get("final_answer", ""),
+        "query": query,
+        "answer": result.get("final_answer", ""),
+        "intent": result.get("intent"),
+        "node_trace": result.get("node_trace", []),
+        "chunks": [
+            {
+                "source": d.get("source"),
+                "doc_type": d.get("doc_type"),
+                "week": d.get("week"),
+                "content": d.get("content"),
+            }
+            for d in chunks
+        ],
         "context": context,
-        "retrieved_chunks": texts + slides,
-        "latency_s": total_elapsed,
-        "node_latencies": node_latencies,
-        "node_trace": state.get("node_trace", []),
-        "verification_report": state.get("verification_report"),
-        "source_diversity": len(all_sources),
-        "intent": intent,
-        "ratio_decidendi": state.get("ratio_decidendi", ""),
-        "irac_analysis": state.get("irac_analysis", ""),
-        "mermaid_diagram": state.get("mermaid_diagram", ""),
-        "retrieved_text_count": len(texts),
-        "retrieved_slide_count": len(slides),
+        "latency_s": round(latency, 2),
+        "source_diversity": len({d.get("source") for d in chunks if d.get("source")}),
+        "mermaid_diagram": result.get("mermaid_diagram") or _extract_mermaid(result.get("final_answer", "")),
+        "irac_analysis": result.get("irac_analysis", ""),
+        "verification": result.get("verification_report"),
+        "token_usage": usage,
+        "escalated_to": result.get("escalated_to"),
     }
 
 
-# ── Baseline: Plain LLM ───────────────────────────────────────────────────────
-
-
-def run_baseline(query: str) -> dict:
-    """Send query directly to the LLM with no retrieval or graph."""
-    start = time.time()
-    answer = llm_call(
-        query,
-        model=BASELINE_MODEL,
-        system_instruction=(
-            "You are an Australian Property Law tutor. Answer the student's "
-            "question as accurately as possible."
-        ),
-    )
-    elapsed = time.time() - start
-    return {
-        "answer": answer,
-        "latency_s": round(elapsed, 2),
-        "node_trace": ["baseline_llm"],
-        "source_diversity": 0,
-    }
-
-
-# ── Ablation: Mega-Prompt (single consolidated LLM call) ──────────────────────
-
-
-def run_ablation_mega_prompt(
-    query: str,
-    week: str | None = None,
-    chat_history: list[dict[str, str]] | None = None,
-) -> dict:
-    """Run retrieval then a single mega-prompt LLM call, bypassing the LangGraph router.
-
-    Tests whether one consolidated prompt can match the quality of the full
-    multi-node pipeline for IRAC extraction, Mermaid generation, and synthesis.
-    """
-    total_start = time.time()
-
-    state: AgentState = {"query": query, "intent": "summary"}
-    if week:
-        state["week_filter"] = week
-    prepared = prepare_chat_history_for_run(chat_history)
-    if prepared:
-        state["chat_history"] = prepared
-
-    state.update(retrieval_node(state))
-    state.update(mega_prompt_node(state))
-
-    total_elapsed = round(time.time() - total_start, 2)
-
-    texts = state.get("retrieved_texts", [])
-    slides = state.get("retrieved_slides", [])
-    all_sources = set(d["source"] for d in texts + slides)
-    context = _format_context(state)
-
-    return {
-        "answer": state.get("final_answer", ""),
-        "context": context,
-        "retrieved_chunks": texts + slides,
-        "latency_s": total_elapsed,
-        "node_trace": state.get("node_trace", []),
-        "source_diversity": len(all_sources),
-        "intent": state.get("intent", "summary"),
-        "ratio_decidendi": state.get("ratio_decidendi", ""),
-        "irac_analysis": state.get("irac_analysis", ""),
-        "mermaid_diagram": state.get("mermaid_diagram", ""),
-    }
-
-
-# ── Evaluation Runner ─────────────────────────────────────────────────────────
-
-
-def run_evaluation(output_dir: Path, *, retrieval_pool_eval: bool = False) -> dict:
-    """Run the full evaluation suite and return results.
-
-    If ``retrieval_pool_eval`` is True, retrieval metrics use a larger retrieved pool
-    (see ``judge_context_precision_with_pool``) — many more judge API calls.
-    """
-    output_dir.mkdir(parents=True, exist_ok=True)
-    all_results: list[dict] = []
-    # Reset the live verification counter so re-runs in the same process
-    # start from zero rather than accumulating across runs.
-    _verification_counters.__init__()
-
-    for i, case in enumerate(EVAL_CASES):
-        last_q = _eval_case_last_turn(case)
-        judge_q = _judge_question_for_case(case)
-        log.info(
-            "═══ Case %d/%d [%s / %s] ═══",
-            i + 1,
-            len(EVAL_CASES),
-            case["query_family"],
-            case["case_id"],
-        )
-
-        # Token usage is tracked per eval case (multi-turn agent runs accumulate per case)
-        reset_token_usage()
-        log.info("Running: full agent")
-        if len(case["user_turns"]) == 1:
-            agent_result = run_agent_with_metrics(case["user_turns"][0])
-        else:
-            agent_result = _run_agent_turns_for_eval(case)
-        agent_result["token_usage"] = get_token_usage().summary()
-
-        # Live verification telemetry (cumulative one-liner, INFO level).
-        _verification_counters.record(i + 1, len(EVAL_CASES), agent_result)
-
-        reset_token_usage()
-        log.info("Running: baseline LLM (final turn only)")
-        baseline_result = run_baseline(last_q)
-        baseline_result["token_usage"] = get_token_usage().summary()
-
-        reset_token_usage()
-        log.info("Running: ablation (mega-prompt, single LLM call)")
-        if len(case["user_turns"]) == 1:
-            ablation_result = run_ablation_mega_prompt(case["user_turns"][0])
-        else:
-            ablation_result = _run_ablation_turns_for_eval(case)
-        ablation_result["token_usage"] = get_token_usage().summary()
-
-        # ── Configuration 4: full agent with reranker disabled ──
-        reset_token_usage()
-        log.info("Running: ablation_no_reranker (full agent, USE_RERANKER=False)")
-        if len(case["user_turns"]) == 1:
-            ablation_no_rr_result = run_agent_with_metrics(
-                case["user_turns"][0], use_reranker=False
-            )
-        else:
-            ablation_no_rr_result = _run_agent_turns_for_eval(case, use_reranker=False)
-        ablation_no_rr_result["token_usage"] = get_token_usage().summary()
-
-        # 4. Extract context and chunks before popping
-        agent_context = agent_result.pop("context")
-        agent_chunks = agent_result.pop("retrieved_chunks")
-        ablation_context = ablation_result.pop("context")
-        ablation_chunks = ablation_result.pop("retrieved_chunks")
-        ablation_no_rr_context = ablation_no_rr_result.pop("context")
-        ablation_no_rr_chunks = ablation_no_rr_result.pop("retrieved_chunks")
-
-        # 5. Judge groundedness (judge_q includes multi-turn framing where needed)
-        log.info("Judging groundedness...")
-        agent_ground = judge_groundedness(judge_q, agent_context, agent_result["answer"])
-        baseline_ground = judge_groundedness(judge_q, agent_context, baseline_result["answer"])
-        ablation_ground = judge_groundedness(judge_q, ablation_context, ablation_result["answer"])
-        ablation_no_rr_ground = judge_groundedness(
-            judge_q, ablation_no_rr_context, ablation_no_rr_result["answer"]
-        )
-
-        # 6. Judge answer relevancy
-        log.info("Judging answer relevancy...")
-        agent_relevancy = judge_answer_relevancy(judge_q, agent_result["answer"])
-        baseline_relevancy = judge_answer_relevancy(judge_q, baseline_result["answer"])
-        ablation_relevancy = judge_answer_relevancy(judge_q, ablation_result["answer"])
-        ablation_no_rr_relevancy = judge_answer_relevancy(
-            judge_q, ablation_no_rr_result["answer"]
-        )
-
-        # 7. Retrieval metrics (relevance of chunks to the **final** user utterance)
-        if retrieval_pool_eval:
-            log.info("Judging retrieval (expanded pool — slow)...")
-            agent_precision = judge_context_precision_with_pool(last_q, week=None)
-            ablation_precision = judge_context_precision_with_pool(last_q, week=None)
-            ablation_no_rr_precision = judge_context_precision_with_pool(last_q, week=None)
-        else:
-            log.info("Judging context precision + ranking (production chunks)...")
-            agent_precision = judge_context_precision(last_q, agent_chunks)
-            ablation_precision = judge_context_precision(last_q, ablation_chunks)
-            ablation_no_rr_precision = judge_context_precision(last_q, ablation_no_rr_chunks)
-
-        # 8. Mermaid validity and IRAC compliance (hypothesis-specific metrics)
-        # Use dedicated node artefacts when present; otherwise score embedded content in
-        # final_answer so ablation/baseline are comparable to the full agent.
-        agent_mermaid = check_mermaid_validity(
-            _mermaid_for_structural_metric(
-                agent_result.get("mermaid_diagram", ""),
-                agent_result.get("answer", ""),
-            )
-        )
-        ablation_mermaid = check_mermaid_validity(
-            _mermaid_for_structural_metric(
-                ablation_result.get("mermaid_diagram", ""),
-                ablation_result.get("answer", ""),
-            )
-        )
-        baseline_mermaid = check_mermaid_validity(
-            _mermaid_for_structural_metric("", baseline_result.get("answer", ""))
-        )
-
-        agent_intent = agent_result.get("intent")
-        ablation_no_rr_intent = ablation_no_rr_result.get("intent")
-        # Mega-prompt and baseline have no router; treat as IRAC-applicable
-        # (they always produce a single legal answer, no chronology branch).
-        agent_irac = check_irac_compliance(
-            _irac_for_structural_metric(
-                agent_result.get("irac_analysis", ""),
-                agent_result.get("answer", ""),
-            ),
-            intent=agent_intent,
-        )
-        ablation_irac = check_irac_compliance(
-            _irac_for_structural_metric(
-                ablation_result.get("irac_analysis", ""),
-                ablation_result.get("answer", ""),
-            )
-        )
-        baseline_irac = check_irac_compliance(
-            _irac_for_structural_metric("", baseline_result.get("answer", ""))
-        )
-
-        ablation_no_rr_mermaid = check_mermaid_validity(
-            _mermaid_for_structural_metric(
-                ablation_no_rr_result.get("mermaid_diagram", ""),
-                ablation_no_rr_result.get("answer", ""),
-            )
-        )
-        ablation_no_rr_irac = check_irac_compliance(
-            _irac_for_structural_metric(
-                ablation_no_rr_result.get("irac_analysis", ""),
-                ablation_no_rr_result.get("answer", ""),
-            ),
-            intent=ablation_no_rr_intent,
-        )
-
-        def _fmt_pct(d: dict) -> str:
-            s = d.get("score")
-            return "n/a" if s is None else f"{s * 100:.0f}%"
-
-        log.info(
-            "Structural — Mermaid: Agent=%s | Ablation=%s | Baseline=%s | "
-            "IRAC: Agent=%s | Ablation=%s | Baseline=%s",
-            _fmt_pct(agent_mermaid),
-            _fmt_pct(ablation_mermaid),
-            _fmt_pct(baseline_mermaid),
-            _fmt_pct(agent_irac),
-            _fmt_pct(ablation_irac),
-            _fmt_pct(baseline_irac),
-        )
-
-        cross_modal_block: dict | None = None
-        if case["query_family"] == "cross_modal_retrieval":
-            cross_modal_block = _cross_modal_signals(agent_result)
-
-        result_entry = {
-            "query_family": case["query_family"],
-            "case_id": case["case_id"],
-            "case_rationale": case["rationale"],
-            "query": last_q,
-            "judge_question": judge_q,
-            "user_turns": list(case["user_turns"]),
-            "agent": {
-                **agent_result,
-                "groundedness": agent_ground,
-                "answer_relevancy": agent_relevancy,
-                "context_precision": agent_precision,
-                "mermaid_validity": agent_mermaid,
-                "irac_compliance": agent_irac,
-            },
-            "baseline": {
-                **baseline_result,
-                "groundedness": baseline_ground,
-                "answer_relevancy": baseline_relevancy,
-                "mermaid_validity": baseline_mermaid,
-                "irac_compliance": baseline_irac,
-            },
-            "ablation_mega_prompt": {
-                **ablation_result,
-                "groundedness": ablation_ground,
-                "answer_relevancy": ablation_relevancy,
-                "context_precision": ablation_precision,
-                "mermaid_validity": ablation_mermaid,
-                "irac_compliance": ablation_irac,
-            },
-            "ablation_no_reranker": {
-                **ablation_no_rr_result,
-                "groundedness": ablation_no_rr_ground,
-                "answer_relevancy": ablation_no_rr_relevancy,
-                "context_precision": ablation_no_rr_precision,
-                "mermaid_validity": ablation_no_rr_mermaid,
-                "irac_compliance": ablation_no_rr_irac,
-            },
-        }
-        if cross_modal_block is not None:
-            result_entry["cross_modal_signals"] = cross_modal_block
-
-        all_results.append(result_entry)
-        log.info(
-            "Groundedness — Agent: %d, Baseline: %d, Ablated: %d | "
-            "Relevancy — Agent: %d, Baseline: %d, Ablated: %d | "
-            "P@K %.2f / MRR %.3f / NDCG %.3f (agent) | "
-            "P@K %.2f / MRR %.3f / NDCG %.3f (ablation)",
-            agent_ground["score"], baseline_ground["score"], ablation_ground["score"],
-            agent_relevancy["score"], baseline_relevancy["score"], ablation_relevancy["score"],
-            agent_precision["precision_at_k"],
-            agent_precision.get("mrr", 0.0),
-            agent_precision.get("ndcg_at_k", 0.0),
-            ablation_precision["precision_at_k"],
-            ablation_precision.get("mrr", 0.0),
-            ablation_precision.get("ndcg_at_k", 0.0),
-        )
-
-    # Save raw results
-    results_path = output_dir / "eval_results.json"
-    with open(results_path, "w") as f:
-        json.dump(all_results, f, indent=2, default=str)
-    log.info("Results saved to %s", results_path)
-
-    # Generate summary
-    summary = _compute_summary(all_results)
-    summary_path = output_dir / "eval_summary.json"
-    with open(summary_path, "w") as f:
-        json.dump(summary, f, indent=2)
-    log.info("Summary saved to %s", summary_path)
-
-    # Generate plots
-    _generate_plots(all_results, summary, output_dir)
-    log.info("Plots saved to %s", output_dir)
-
-    # Generate failure analysis
-    _generate_failure_analysis(all_results, output_dir)
-
-    # Emit human spot-check scaffolding (qualitative validation of LLM judges)
-    _human_spot_check_log(all_results, output_dir)
-
-    return summary
-
-
-def _compute_summary(results: list[dict]) -> dict:
-    """Compute aggregate metrics from evaluation results."""
-    # Include the new ``ablation_no_reranker`` configuration when present.
-    base_configs = ["agent", "baseline", "ablation_mega_prompt"]
-    if results and "ablation_no_reranker" in results[0]:
-        configs = base_configs + ["ablation_no_reranker"]
-    else:
-        configs = base_configs
-    summary = {}
-
-    for config in configs:
-        scores = [r[config]["groundedness"]["score"] for r in results]
-        relevancies = [r[config]["answer_relevancy"]["score"] for r in results]
-        latencies = [r[config]["latency_s"] for r in results]
-        diversities = [r[config].get("source_diversity", 0) for r in results]
-
-        mermaid_scores = [r[config]["mermaid_validity"]["score"] for r in results]
-        # IRAC scores may be None when the router intent is "chronology" or
-        # "general" (IRAC structure is not expected). Exclude those from the
-        # average and report counts separately.
-        irac_scores_raw = [r[config]["irac_compliance"]["score"] for r in results]
-        irac_scores_applicable = [s for s in irac_scores_raw if s is not None]
-        irac_avg = (
-            round(sum(irac_scores_applicable) / len(irac_scores_applicable), 2)
-            if irac_scores_applicable
-            else 0.0
-        )
-
-        entry = {
-            "avg_groundedness": round(sum(scores) / len(scores), 2),
-            "avg_answer_relevancy": round(sum(relevancies) / len(relevancies), 2),
-            "avg_mermaid_validity": round(sum(mermaid_scores) / len(mermaid_scores), 2),
-            "avg_irac_compliance": irac_avg,
-            "irac_applicable_count": len(irac_scores_applicable),
-            "irac_not_applicable_count": len(irac_scores_raw) - len(irac_scores_applicable),
-            "avg_latency_s": round(sum(latencies) / len(latencies), 2),
-            "avg_source_diversity": round(sum(diversities) / len(diversities), 2),
-            "groundedness_scores": scores,
-            "answer_relevancy_scores": relevancies,
-            "mermaid_scores": mermaid_scores,
-            "irac_scores": irac_scores_raw,
-            "latencies": latencies,
-        }
-
-        # Context precision (agent and ablation only)
-        if "context_precision" in results[0].get(config, {}):
-            precisions = [r[config]["context_precision"]["precision_at_k"] for r in results]
-            entry["avg_context_precision"] = round(sum(precisions) / len(precisions), 2)
-            entry["context_precisions"] = precisions
-            cp0 = results[0][config]["context_precision"]
-            if "mrr" in cp0:
-                entry["avg_mrr"] = round(
-                    sum(r[config]["context_precision"]["mrr"] for r in results) / len(results),
-                    3,
-                )
-                entry["avg_hit_at_k"] = round(
-                    sum(r[config]["context_precision"]["hit_at_k"] for r in results) / len(results),
-                    3,
-                )
-                entry["avg_ndcg_at_k"] = round(
-                    sum(r[config]["context_precision"]["ndcg_at_k"] for r in results) / len(results),
-                    3,
-                )
-                entry["mrr_per_query"] = [r[config]["context_precision"]["mrr"] for r in results]
-                entry["hit_at_k_per_query"] = [
-                    r[config]["context_precision"]["hit_at_k"] for r in results
-                ]
-                entry["ndcg_at_k_per_query"] = [
-                    r[config]["context_precision"]["ndcg_at_k"] for r in results
-                ]
-            recalls = [
-                r[config]["context_precision"].get("recall_vs_pool")
-                for r in results
-                if r[config]["context_precision"].get("recall_vs_pool") is not None
-            ]
-            if recalls:
-                entry["avg_recall_vs_pool"] = round(sum(recalls) / len(recalls), 3)
-
-        # Token usage
-        if "token_usage" in results[0].get(config, {}):
-            total_input = sum(r[config]["token_usage"]["total_input_tokens"] for r in results)
-            total_output = sum(r[config]["token_usage"]["total_output_tokens"] for r in results)
-            entry["total_input_tokens"] = total_input
-            entry["total_output_tokens"] = total_output
-            entry["total_tokens"] = total_input + total_output
-            entry["avg_tokens_per_query"] = round((total_input + total_output) / len(results))
-
-        summary[config] = entry
-
-    # Per-node latency averages (agent only)
-    node_names = set()
-    for r in results:
-        node_names.update(r["agent"].get("node_latencies", {}).keys())
-
-    node_avg: dict[str, float] = {}
-    for node in sorted(node_names):
-        vals = [
-            r["agent"]["node_latencies"].get(node, 0)
-            for r in results
-            if "node_latencies" in r["agent"]
-        ]
-        if vals:
-            node_avg[node] = round(sum(vals) / len(vals), 2)
-    summary["agent"]["avg_node_latencies"] = node_avg
-
-    summary["by_query_family"] = _summary_by_query_family(results)
-
-    return summary
-
-
-def _summary_by_query_family(results: list[dict]) -> dict[str, dict]:
-    """Aggregate agent metrics per ``query_family`` for the report and plots."""
-    grouped: dict[str, list[dict]] = {}
-    for r in results:
-        fam = r.get("query_family", "unknown")
-        grouped.setdefault(fam, []).append(r)
-
-    out: dict[str, dict] = {}
-    for fam, rows in grouped.items():
-        n = len(rows)
-        agent_g = sum(x["agent"]["groundedness"]["score"] for x in rows) / n
-        agent_r = sum(x["agent"]["answer_relevancy"]["score"] for x in rows) / n
-        precisions = [
-            x["agent"]["context_precision"]["precision_at_k"]
-            for x in rows
-            if x["agent"].get("context_precision")
-        ]
-        entry: dict = {
-            "description": QUERY_FAMILY_DESCRIPTIONS.get(fam, ""),
-            "case_count": n,
-            "case_ids": [x.get("case_id") for x in rows],
-            "agent_avg_groundedness": round(agent_g, 2),
-            "agent_avg_answer_relevancy": round(agent_r, 2),
-        }
-        if precisions:
-            entry["agent_avg_context_precision"] = round(sum(precisions) / len(precisions), 2)
-        if fam == "cross_modal_retrieval":
-            hits = sum(
-                1
-                for x in rows
-                if x.get("cross_modal_signals", {}).get("both_modalities_retrieved")
-            )
-            entry["fraction_cases_with_text_and_slides_retrieved"] = round(hits / n, 2)
-        out[fam] = entry
-    return out
-
-
-# ── Failure Analysis ──────────────────────────────────────────────────────────
-
-
-def _generate_failure_analysis(results: list[dict], output_dir: Path) -> None:
-    """Analyse evaluation results and generate a failure analysis report."""
-    lines: list[str] = [
-        "# Failure Analysis Report",
-        "",
-        "Auto-generated from evaluation results. This report identifies queries where "
-        "the system underperformed and categorises the root causes.",
-        "",
-    ]
-
-    # ── 0. Explicit query family coverage (coursework requirement) ───────────
-    lines.append("## 0. Query family coverage")
-    lines.append("")
-    lines.append(
-        "Every eval case is assigned **exactly one** of four families. "
-        "Use this table for success/failure discussion per family."
-    )
-    lines.append("")
-    lines.append("| Family | Cases | Case IDs |")
-    lines.append("|--------|-------|----------|")
-    fam_order = [
-        "factual_retrieval",
-        "cross_modal_retrieval",
-        "analytical_synthesis",
-        "conversational_followup",
-    ]
-    by_fam: dict[str, list[dict]] = {k: [] for k in fam_order}
-    for r in results:
-        fam = r.get("query_family", "unknown")
-        by_fam.setdefault(fam, []).append(r)
-    for fam in fam_order + [k for k in sorted(by_fam.keys()) if k not in fam_order]:
-        rows = by_fam.get(fam, [])
-        if not rows:
-            continue
-        ids = ", ".join(str(x.get("case_id", "?")) for x in rows)
-        lines.append(f"| **{fam}** | {len(rows)} | {ids} |")
-    lines.append("")
-    for fam in fam_order:
-        desc = QUERY_FAMILY_DESCRIPTIONS.get(fam)
-        if desc:
-            lines.append(f"- **{fam}:** {desc}")
-    lines.append("")
-
-    for fam in fam_order:
-        rows = by_fam.get(fam, [])
-        if not rows:
-            continue
-        lines.append(f"### Family: `{fam}`")
-        lines.append("")
-        for r in rows:
-            cid = r.get("case_id", "?")
-            ag = r["agent"]["groundedness"]["score"]
-            ar = r["agent"]["answer_relevancy"]["score"]
-            turns = r.get("user_turns", [r.get("query", "")])
-            turn_note = f"{len(turns)} turn(s)" if len(turns) > 1 else "single turn"
-            lines.append(f"- **{cid}** ({turn_note}): groundedness **{ag}/5**, relevancy **{ar}/5**")
-            rat = r.get("case_rationale")
-            if rat:
-                lines.append(f"  - *Rationale:* {rat}")
-            xm = r.get("cross_modal_signals")
-            if xm:
-                lines.append(
-                    f"  - *Retrieval:* text chunks={xm.get('retrieved_text_chunks', 0)}, "
-                    f"slide chunks={xm.get('retrieved_slide_chunks', 0)}, "
-                    f"both_modalities={xm.get('both_modalities_retrieved')}"
-                )
-        lines.append("")
-
-    # ── 1. Low groundedness (agent scored < 4) ─────────────────────────────
-    low_ground = [
-        r for r in results
-        if r["agent"]["groundedness"]["score"] < 4
-    ]
-    lines.append("## 1. Low Groundedness (Agent < 4/5)")
-    lines.append("")
-    if low_ground:
-        for r in low_ground:
-            score = r["agent"]["groundedness"]["score"]
-            reasoning = r["agent"]["groundedness"]["reasoning"]
-            fam = r.get("query_family", "N/A")
-            cid = r.get("case_id", "N/A")
-            lines.append(f"### [{fam} / {cid}] \"{r['query']}\"")
-            lines.append(f"- **Score:** {score}/5")
-            lines.append(f"- **Judge reasoning:** {reasoning}")
-            lines.append(f"- **Intent:** {r['agent'].get('intent', 'N/A')}")
-            lines.append(f"- **Sources retrieved:** {r['agent'].get('source_diversity', 0)} unique")
-            lines.append("")
-    else:
-        lines.append("No queries scored below 4. All agent answers were well-grounded.")
-        lines.append("")
-
-    # ── 2. Agent scored lower than ablation ────────────────────────────────
-    ablation_wins = [
-        r for r in results
-        if r["ablation_mega_prompt"]["groundedness"]["score"] > r["agent"]["groundedness"]["score"]
-    ]
-    lines.append("## 2. Ablation Outperformed Agent")
-    lines.append("")
-    lines.append(
-        "Cases where the single mega-prompt outperformed the full agent on groundedness, "
-        "suggesting the multi-node pipeline introduced unverifiable inferences on those queries."
-    )
-    lines.append("")
-    if ablation_wins:
-        for r in ablation_wins:
-            agent_s = r["agent"]["groundedness"]["score"]
-            ablation_s = r["ablation_mega_prompt"]["groundedness"]["score"]
-            agent_reason = r["agent"]["groundedness"]["reasoning"]
-            lines.append(f"### Q: \"{r['query']}\"")
-            lines.append(f"- **Agent:** {agent_s}/5 | **Ablation:** {ablation_s}/5")
-            lines.append(f"- **Agent judge reasoning:** {agent_reason}")
-            lines.append("")
-    else:
-        lines.append("The agent matched or outperformed the ablation on all queries.")
-        lines.append("")
-
-    # ── 3. Low context precision (retrieval misses) ────────────────────────
-    low_precision = [
-        r for r in results
-        if r["agent"].get("context_precision", {}).get("precision_at_k", 1.0) < 0.7
-    ]
-    lines.append("## 3. Low Context Precision (Retrieval < 70%)")
-    lines.append("")
-    lines.append(
-        "Queries where fewer than 70% of retrieved chunks were judged relevant, "
-        "indicating the retrieval missed the target topic."
-    )
-    lines.append("")
-    if low_precision:
-        for r in low_precision:
-            prec = r["agent"]["context_precision"]
-            lines.append(f"### Q: \"{r['query']}\"")
-            lines.append(
-                f"- **Precision@K:** {prec['precision_at_k']:.0%} "
-                f"({prec['relevant_count']}/{prec['total_count']} relevant)"
-            )
-            lines.append(f"- **Verdicts:** {prec['verdicts']}")
-            lines.append("")
-    else:
-        lines.append("All queries achieved >= 70% context precision.")
-        lines.append("")
-
-    # ── 4. Low answer relevancy ────────────────────────────────────────────
-    low_relevancy = [
-        r for r in results
-        if r["agent"]["answer_relevancy"]["score"] < 4
-    ]
-    lines.append("## 4. Low Answer Relevancy (Agent < 4/5)")
-    lines.append("")
-    if low_relevancy:
-        for r in low_relevancy:
-            score = r["agent"]["answer_relevancy"]["score"]
-            reasoning = r["agent"]["answer_relevancy"]["reasoning"]
-            lines.append(f"### Q: \"{r['query']}\"")
-            lines.append(f"- **Score:** {score}/5")
-            lines.append(f"- **Judge reasoning:** {reasoning}")
-            lines.append("")
-    else:
-        lines.append("All agent answers scored 4+ on relevancy.")
-        lines.append("")
-
-    # ── 5. Baseline outperformed agent ─────────────────────────────────────
-    baseline_wins = [
-        r for r in results
-        if r["baseline"]["groundedness"]["score"] > r["agent"]["groundedness"]["score"]
-    ]
-    lines.append("## 5. Baseline Outperformed Agent")
-    lines.append("")
-    if baseline_wins:
-        lines.append(
-            "**Critical finding:** These queries show the plain LLM scored higher "
-            "than the full agent, suggesting retrieval may have introduced noise."
-        )
-        lines.append("")
-        for r in baseline_wins:
-            agent_s = r["agent"]["groundedness"]["score"]
-            baseline_s = r["baseline"]["groundedness"]["score"]
-            lines.append(f"### Q: \"{r['query']}\"")
-            lines.append(f"- **Agent:** {agent_s}/5 | **Baseline:** {baseline_s}/5")
-            lines.append(f"- **Agent reasoning:** {r['agent']['groundedness']['reasoning']}")
-            lines.append(f"- **Baseline reasoning:** {r['baseline']['groundedness']['reasoning']}")
-            lines.append("")
-    else:
-        lines.append("The agent matched or outperformed the baseline on all queries.")
-        lines.append("")
-
-    # ── 5b. Reranker contribution: agent vs ablation_no_reranker ───────────
-    if results and "ablation_no_reranker" in results[0]:
-        reranker_helped: list[dict] = []
-        reranker_hurt: list[dict] = []
-        for r in results:
-            agent_p = r["agent"].get("context_precision", {}).get("precision_at_k", 0.0)
-            no_rr_p = r["ablation_no_reranker"].get("context_precision", {}).get("precision_at_k", 0.0)
-            if agent_p > no_rr_p:
-                reranker_helped.append(r)
-            elif no_rr_p > agent_p:
-                reranker_hurt.append(r)
-        lines.append("## 5b. Reranker Ablation (Agent vs no-reranker)")
-        lines.append("")
-        lines.append(
-            "Compares context precision between the full agent (cross-encoder reranker on) "
-            "and the same agent run with `USE_RERANKER=False`. This isolates the contribution "
-            "of the reranker."
-        )
-        lines.append("")
-        lines.append(
-            f"- Reranker improved precision on **{len(reranker_helped)}/{len(results)}** queries"
-        )
-        lines.append(
-            f"- Reranker hurt precision on **{len(reranker_hurt)}/{len(results)}** queries"
-        )
-        lines.append(
-            f"- Tie on **{len(results) - len(reranker_helped) - len(reranker_hurt)}/{len(results)}**"
-        )
-        lines.append("")
-
-    # ── 6. Summary statistics ──────────────────────────────────────────────
-    total = len(results)
-    lines.append("## 6. Summary")
-    lines.append("")
-    lines.append(f"| Category | Count | Percentage |")
-    lines.append(f"|----------|-------|------------|")
-    lines.append(f"| Total queries | {total} | 100% |")
-    lines.append(f"| Low groundedness (<4) | {len(low_ground)} | {len(low_ground)/total*100:.0f}% |")
-    lines.append(f"| Ablation outperformed agent | {len(ablation_wins)} | {len(ablation_wins)/total*100:.0f}% |")
-    lines.append(f"| Low context precision (<70%) | {len(low_precision)} | {len(low_precision)/total*100:.0f}% |")
-    lines.append(f"| Low answer relevancy (<4) | {len(low_relevancy)} | {len(low_relevancy)/total*100:.0f}% |")
-    lines.append(f"| Baseline outperformed agent | {len(baseline_wins)} | {len(baseline_wins)/total*100:.0f}% |")
-    lines.append("")
-
-    report_path = output_dir / "failure_analysis.md"
-    with open(report_path, "w") as f:
-        f.write("\n".join(lines))
-    log.info("Failure analysis saved to %s", report_path)
-
-
-# ── Plot Generation ────────────────────────────────────────────────────────────
-
-
-def _generate_plots(results: list[dict], summary: dict, output_dir: Path) -> None:
-    """Generate comparison plots and save as PNG."""
-    has_no_rr = bool(results) and "ablation_no_reranker" in results[0]
-    configs = ["agent", "baseline", "ablation_mega_prompt"]
-    labels = ["Full Agent", "Plain LLM\n(Baseline)", "Mega-Prompt\n(Ablation)"]
-    colors = ["#2563eb", "#9ca3af", "#f59e0b"]
-    if has_no_rr:
-        configs.append("ablation_no_reranker")
-        labels.append("Agent\n(no reranker)")
-        colors.append("#10b981")
-
-    # 1. Groundedness comparison
-    fig, ax = plt.subplots(figsize=(8, 5))
-    scores = [summary[c]["avg_groundedness"] for c in configs]
-    bars = ax.bar(labels, scores, color=colors, edgecolor="black")
-    ax.set_ylabel("Average Groundedness Score (1-5)")
-    ax.set_title("Groundedness: Full Agent vs Baseline vs Ablation")
-    ax.set_ylim(0, 5.5)
-    for bar, score in zip(bars, scores):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.1,
-                f"{score:.1f}", ha="center", fontweight="bold")
-    plt.tight_layout()
-    plt.savefig(output_dir / "groundedness_comparison.png", dpi=150)
-    plt.close()
-
-    # 2. Answer relevancy comparison
-    fig, ax = plt.subplots(figsize=(8, 5))
-    relevancies = [summary[c]["avg_answer_relevancy"] for c in configs]
-    bars = ax.bar(labels, relevancies, color=colors, edgecolor="black")
-    ax.set_ylabel("Average Answer Relevancy (1-5)")
-    ax.set_title("Answer Relevancy: Full Agent vs Baseline vs Ablation")
-    ax.set_ylim(0, 5.5)
-    for bar, rel in zip(bars, relevancies):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.1,
-                f"{rel:.1f}", ha="center", fontweight="bold")
-    plt.tight_layout()
-    plt.savefig(output_dir / "answer_relevancy_comparison.png", dpi=150)
-    plt.close()
-
-    # 3. Context precision comparison (agent and ablation only)
-    retrieval_configs = ["agent", "ablation_mega_prompt"]
-    retrieval_labels = ["Full Agent\n(MMR)", "Mega-Prompt\n(Ablation)"]
-    precisions = [summary[c].get("avg_context_precision", 0) for c in retrieval_configs]
-    if any(p > 0 for p in precisions):
-        fig, ax = plt.subplots(figsize=(8, 5))
-        bars = ax.bar(retrieval_labels, precisions, color=["#2563eb", "#f59e0b"], edgecolor="black")
-        ax.set_ylabel("Average Context Precision@K")
-        ax.set_title("Retrieval Quality: Context Precision@K")
-        ax.set_ylim(0, 1.1)
-        for bar, prec in zip(bars, precisions):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
-                    f"{prec:.2f}", ha="center", fontweight="bold")
-        plt.tight_layout()
-        plt.savefig(output_dir / "context_precision.png", dpi=150)
-        plt.close()
-
-        # 3b. Ranking metrics (agent vs ablation)
-        if all("avg_mrr" in summary[c] for c in retrieval_configs):
-            fig, ax = plt.subplots(figsize=(9, 5))
-            metrics_rank = ["MRR", "Hit@K", "NDCG@K"]
-            xw = range(len(metrics_rank))
-            width = 0.35
-            agent_vals = [
-                summary["agent"]["avg_mrr"],
-                summary["agent"]["avg_hit_at_k"],
-                summary["agent"]["avg_ndcg_at_k"],
-            ]
-            ab_vals = [
-                summary["ablation_mega_prompt"]["avg_mrr"],
-                summary["ablation_mega_prompt"]["avg_hit_at_k"],
-                summary["ablation_mega_prompt"]["avg_ndcg_at_k"],
-            ]
-            ax.bar([i - width / 2 for i in xw], agent_vals, width, label="Full Agent", color="#2563eb", edgecolor="black")
-            ax.bar([i + width / 2 for i in xw], ab_vals, width, label="Ablation", color="#f59e0b", edgecolor="black")
-            ax.set_xticks(list(xw))
-            ax.set_xticklabels(metrics_rank)
-            ax.set_ylabel("Score (0–1)")
-            ax.set_title("Retrieval ranking metrics (LLM-judged binary relevance)")
-            ax.set_ylim(0, 1.1)
-            ax.legend()
-            plt.tight_layout()
-            plt.savefig(output_dir / "retrieval_ranking_metrics.png", dpi=150)
-            plt.close()
-
-    # 4. Latency comparison
-    fig, ax = plt.subplots(figsize=(8, 5))
-    latencies = [summary[c]["avg_latency_s"] for c in configs]
-    bars = ax.bar(labels, latencies, color=colors, edgecolor="black")
-    ax.set_ylabel("Average Latency (seconds)")
-    ax.set_title("Latency: Full Agent vs Baseline vs Ablation")
-    for bar, lat in zip(bars, latencies):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
-                f"{lat:.1f}s", ha="center", fontweight="bold")
-    plt.tight_layout()
-    plt.savefig(output_dir / "latency_comparison.png", dpi=150)
-    plt.close()
-
-    # 5. Per-query groundedness breakdown
-    fig, ax = plt.subplots(figsize=(12, 6))
-    x = range(len(results))
-    query_labels = [f"Q{i+1}" for i in x]
-
-    short_labels = ["Agent", "Baseline", "Ablation"] + (["No-Reranker"] if has_no_rr else [])
-    bar_w = 0.22 if has_no_rr else 0.25
-    n = len(configs)
-    for i, (config, label) in enumerate(zip(configs, short_labels)):
-        scores = [r[config]["groundedness"]["score"] for r in results]
-        offset = (i - (n - 1) / 2) * bar_w
-        ax.bar([xi + offset for xi in x], scores, width=bar_w, label=label)
-
-    ax.set_ylabel("Groundedness Score")
-    ax.set_title("Per-Query Groundedness Breakdown")
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(query_labels)
-    ax.set_ylim(0, 5.5)
-    ax.legend()
-    plt.tight_layout()
-    plt.savefig(output_dir / "per_query_groundedness.png", dpi=150)
-    plt.close()
-
-    # 6. Source diversity comparison
-    fig, ax = plt.subplots(figsize=(8, 5))
-    diversities = [summary[c]["avg_source_diversity"] for c in configs]
-    bars = ax.bar(labels, diversities, color=colors, edgecolor="black")
-    ax.set_ylabel("Average Unique Sources Retrieved")
-    ax.set_title("Source Diversity: Full Agent vs Baseline vs Ablation")
-    for bar, div in zip(bars, diversities):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.1,
-                f"{div:.1f}", ha="center", fontweight="bold")
-    plt.tight_layout()
-    plt.savefig(output_dir / "source_diversity.png", dpi=150)
-    plt.close()
-
-    # 7. Per-node latency breakdown
-    node_lats = summary["agent"].get("avg_node_latencies", {})
-    if node_lats:
-        fig, ax = plt.subplots(figsize=(8, 5))
-        nodes = list(node_lats.keys())
-        values = list(node_lats.values())
-        bars = ax.barh(nodes, values, color="#2563eb", edgecolor="black")
-        ax.set_xlabel("Average Latency (seconds)")
-        ax.set_title("Per-Node Latency Breakdown (Full Agent)")
-        for bar, val in zip(bars, values):
-            ax.text(bar.get_width() + 0.3, bar.get_y() + bar.get_height() / 2,
-                    f"{val:.1f}s", va="center", fontweight="bold")
-        plt.tight_layout()
-        plt.savefig(output_dir / "node_latency_breakdown.png", dpi=150)
-        plt.close()
-
-    # 8. Radar / multi-metric summary
-    fig, ax = plt.subplots(figsize=(10, 5))
-    metric_names = ["Groundedness", "Answer\nRelevancy", "Source\nDiversity\n(norm)"]
-    radar_labels = ["Full Agent", "Baseline", "Ablation"] + (["No-Reranker"] if has_no_rr else [])
-    for config, label, color in zip(configs, radar_labels, colors):
-        vals = [
-            summary[config]["avg_groundedness"],
-            summary[config]["avg_answer_relevancy"],
-            min(summary[config]["avg_source_diversity"] / 8.0 * 5, 5.0),
-        ]
-        if "avg_context_precision" in summary[config]:
-            metric_names_ext = metric_names + ["Context\nPrecision"]
-            vals.append(summary[config]["avg_context_precision"] * 5)
-        else:
-            metric_names_ext = metric_names
-        x_pos = range(len(vals))
-        ax.plot(list(x_pos), vals, "o-", label=label, color=color, linewidth=2, markersize=8)
-
-    ax.set_xticks(range(len(metric_names_ext)))
-    ax.set_xticklabels(metric_names_ext)
-    ax.set_ylim(0, 5.5)
-    ax.set_ylabel("Score (normalised to 0-5)")
-    ax.set_title("Multi-Metric Comparison")
-    ax.legend()
-    ax.grid(axis="y", alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(output_dir / "multi_metric_comparison.png", dpi=150)
-    plt.close()
-
-    # 9. Token usage comparison (stacked: input vs output)
-    if all("total_tokens" in summary[c] for c in configs):
-        fig, ax = plt.subplots(figsize=(8, 5))
-        input_tokens = [summary[c]["total_input_tokens"] for c in configs]
-        output_tokens = [summary[c]["total_output_tokens"] for c in configs]
-        bars1 = ax.bar(labels, input_tokens, label="Input Tokens", color="#2563eb", edgecolor="black")
-        bars2 = ax.bar(labels, output_tokens, bottom=input_tokens, label="Output Tokens", color="#60a5fa", edgecolor="black")
-        ax.set_ylabel("Total Tokens (across all queries)")
-        ax.set_title("Token Usage: Full Agent vs Baseline vs Ablation")
-        ax.legend()
-        for bar, inp, out in zip(bars1, input_tokens, output_tokens):
-            total = inp + out
-            ax.text(bar.get_x() + bar.get_width() / 2, total + max(input_tokens) * 0.02,
-                    f"{total:,}", ha="center", fontweight="bold", fontsize=9)
-        plt.tight_layout()
-        plt.savefig(output_dir / "token_usage_comparison.png", dpi=150)
-        plt.close()
-
-    # 10. Structural metrics: Mermaid validity + IRAC compliance
-    fig, ax = plt.subplots(figsize=(10, 5))
-    x = range(len(configs))
-    width = 0.35
-    mermaid_vals = [summary[c]["avg_mermaid_validity"] * 100 for c in configs]
-    irac_vals = [summary[c]["avg_irac_compliance"] * 100 for c in configs]
-
-    bars1 = ax.bar([xi - width / 2 for xi in x], mermaid_vals, width, label="Mermaid Validity", color="#2563eb", edgecolor="black")
-    bars2 = ax.bar([xi + width / 2 for xi in x], irac_vals, width, label="IRAC Compliance", color="#f59e0b", edgecolor="black")
-    ax.set_ylabel("Score (%)")
-    ax.set_title("Structural Output Quality: Mermaid Validity & IRAC Compliance")
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(labels)
-    ax.set_ylim(0, 110)
-    ax.legend()
-    for bar, val in zip(list(bars1) + list(bars2), mermaid_vals + irac_vals):
-        if val > 0:
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 2,
-                    f"{val:.0f}%", ha="center", fontweight="bold", fontsize=9)
-        else:
-            ax.text(bar.get_x() + bar.get_width() / 2, 2,
-                    "0%", ha="center", fontweight="bold", fontsize=9, color="red")
-    plt.tight_layout()
-    plt.savefig(output_dir / "structural_metrics.png", dpi=150)
-    plt.close()
-
-    # 11. Agent groundedness by query family
-    bf = summary.get("by_query_family")
-    if bf:
-        fam_keys = list(bf.keys())
-        fig, ax = plt.subplots(figsize=(9, 5))
-        scores = [bf[k]["agent_avg_groundedness"] for k in fam_keys]
-        colours = ["#2563eb", "#7c3aed", "#059669", "#ea580c"]
-        bar_cols = [colours[i % len(colours)] for i in range(len(fam_keys))]
-        bars = ax.bar(fam_keys, scores, color=bar_cols, edgecolor="black")
-        ax.set_ylabel("Average groundedness (1–5)")
-        ax.set_title("Full agent: groundedness by query family")
-        ax.set_ylim(0, 5.5)
-        ax.tick_params(axis="x", rotation=15)
-        for bar, score in zip(bars, scores):
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.08,
-                f"{score:.2f}",
-                ha="center",
-                fontweight="bold",
-                fontsize=9,
-            )
-        plt.tight_layout()
-        plt.savefig(output_dir / "groundedness_by_query_family.png", dpi=150)
-        plt.close()
-
-    # 12. Precision: agent (with reranker) vs ablation_no_reranker
-    if has_no_rr:
-        fig, ax = plt.subplots(figsize=(8, 5))
-        rr_labels = ["Agent\n(with reranker)", "Agent\n(no reranker)"]
-        rr_vals = [
-            summary["agent"].get("avg_context_precision", 0),
-            summary["ablation_no_reranker"].get("avg_context_precision", 0),
-        ]
-        bars = ax.bar(rr_labels, rr_vals, color=["#2563eb", "#10b981"], edgecolor="black")
-        ax.set_ylabel("Average Context Precision@K")
-        ax.set_title("Reranker Ablation: Precision@K with vs without cross-encoder")
-        ax.set_ylim(0, 1.1)
-        for bar, val in zip(bars, rr_vals):
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.02,
-                f"{val:.2f}",
-                ha="center",
-                fontweight="bold",
-            )
-        plt.tight_layout()
-        plt.savefig(output_dir / "precision_with_vs_without_reranker.png", dpi=150)
-        plt.close()
-
-    # 13. Groundedness across all four configurations
-    if has_no_rr:
-        fig, ax = plt.subplots(figsize=(9, 5))
-        four_vals = [summary[c]["avg_groundedness"] for c in configs]
-        bars = ax.bar(labels, four_vals, color=colors, edgecolor="black")
-        ax.set_ylabel("Average Groundedness Score (1–5)")
-        ax.set_title("Groundedness: four-way comparison")
-        ax.set_ylim(0, 5.5)
-        for bar, val in zip(bars, four_vals):
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.1,
-                f"{val:.1f}",
-                ha="center",
-                fontweight="bold",
-            )
-        plt.tight_layout()
-        plt.savefig(output_dir / "groundedness_four_way.png", dpi=150)
-        plt.close()
-
-    log.info("Generated evaluation plots")
-
-
-# ── Human spot-check log (qualitative validation of LLM judges) ───────────────
-
-
-def _human_spot_check_log(results: list[dict], output_dir: Path, *, seed: int = 4205) -> None:
-    """Sample 5 cases (deterministic) and emit a markdown log for human ratings.
-
-    The harness writes the structure (case ID, question, agent answer, judge
-    scores, blank fields). The user fills the rating boxes by hand later. The
-    purpose is to support qualitative validation of the LLM-as-a-judge results
-    — once filled, agreement between human scores and judge scores can be
-    computed and reported.
-    """
-    import random
-
-    rng = random.Random(seed)
-    sample_n = min(5, len(results))
-    sample = rng.sample(list(results), sample_n)
-
-    lines: list[str] = [
-        "# Human Spot-Check Log",
-        "",
-        "_This log exists to support **qualitative validation of the LLM-as-a-judge**_",
-        "_pipeline. Five evaluation cases have been sampled deterministically_",
-        f"_(seed={seed}). Fill in **Human Score (1–5)** and **Comments** by hand,_",
-        "_then re-run the harness or compute disagreement (mean absolute error_",
-        "_between Human Score and `judge_groundedness.score`) yourself._",
-        "",
-        "Disagreement convention: |human − judge| ≥ 2 indicates a substantive",
-        "rating gap that should be discussed in the report.",
-        "",
-        "---",
-        "",
-    ]
-
-    for i, r in enumerate(sample, start=1):
-        cid = r.get("case_id", f"unknown_{i}")
-        fam = r.get("query_family", "?")
-        question = r.get("query", "")
-        agent_ans = r["agent"].get("answer", "") or ""
-        judge_g = r["agent"]["groundedness"].get("score", "")
-        judge_r = r["agent"]["answer_relevancy"].get("score", "")
-
-        # Truncate the answer so the log stays human-readable.
-        snippet = agent_ans.strip()
-        if len(snippet) > 1200:
-            snippet = snippet[:1200].rstrip() + "\n\n…[truncated for readability]"
-
-        lines.extend(
+def run_agent_with_metrics(case: EvalCase) -> dict:
+    """Replay all user turns; the metrics report on the FINAL turn."""
+    prior: list[dict] = []
+    last: dict = {}
+    for turn in case["user_turns"]:
+        last = _run_one_turn_with_timing(turn, week=None, history=prior)
+        prior.extend(
             [
-                f"## Spot-check {i} — `{cid}` ({fam})",
-                "",
-                f"**Question:** {question}",
-                "",
-                "**Agent answer (excerpt):**",
-                "",
-                "```",
-                snippet,
-                "```",
-                "",
-                f"**Judge groundedness:** {judge_g}/5  ",
-                f"**Judge answer relevancy:** {judge_r}/5",
-                "",
-                "**Human groundedness (1–5):** ☐  ",
-                "**Human answer relevancy (1–5):** ☐",
-                "",
-                "**Comments (free text):**",
-                "",
-                "> ",
-                "",
-                "---",
-                "",
+                {"role": "user", "content": turn},
+                {"role": "assistant", "content": last["answer"]},
             ]
         )
-
-    out_path = output_dir / "human_spot_check.md"
-    with open(out_path, "w") as f:
-        f.write("\n".join(lines))
-    log.info("Human spot-check log saved to %s", out_path)
+    return last
 
 
-# ── CLI Entry Point ────────────────────────────────────────────────────────────
+# ── Retrieval-mode comparison (the headline plot) ────────────────────────────
+
+
+RETRIEVAL_MODES: list[dict] = [
+    {"name": "dense_only_no_rerank", "use_hybrid": False, "use_reranker": False},
+    {"name": "dense_only_rerank",    "use_hybrid": False, "use_reranker": True},
+    {"name": "hybrid_no_rerank",     "use_hybrid": True,  "use_reranker": False},
+    {"name": "hybrid_rerank",        "use_hybrid": True,  "use_reranker": True},
+]
+
+
+def _retrieve_with_mode(query: str, use_hybrid: bool, use_reranker: bool) -> list[dict]:
+    """Toggle USE_HYBRID_RETRIEVAL via monkeypatch-style attribute set + pass
+    use_reranker through retrieve_all. Restores original at the end."""
+    from src.agent import tools as tools_mod
+
+    original = tools_mod.USE_HYBRID_RETRIEVAL
+    tools_mod.USE_HYBRID_RETRIEVAL = bool(use_hybrid)
+    try:
+        texts, slides = retrieve_all(
+            query, week=None, k_text=8, k_slides=4, use_reranker=use_reranker
+        )
+    finally:
+        tools_mod.USE_HYBRID_RETRIEVAL = original
+    return [*texts, *slides]
+
+
+def compare_retrieval_modes(cases: list[EvalCase]) -> dict:
+    """For each case + mode, judge retrieved chunks and compute precision/MRR/NDCG."""
+    per_case: list[dict] = []
+    for case in cases:
+        q = _eval_case_last_turn(case)
+        modes: dict[str, dict] = {}
+        for mode in RETRIEVAL_MODES:
+            chunks = _retrieve_with_mode(q, mode["use_hybrid"], mode["use_reranker"])
+            metrics = judge_context_precision(q, chunks)
+            modes[mode["name"]] = {
+                "precision_at_k": metrics["precision_at_k"],
+                "mrr": metrics["mrr"],
+                "ndcg_at_k": metrics["ndcg_at_k"],
+                "hit_at_k": metrics["hit_at_k"],
+                "k": metrics["k"],
+                "verdicts": metrics["verdicts"],
+                "n_chunks": len(chunks),
+            }
+        per_case.append({"case_id": case["case_id"], "query": q, "modes": modes})
+
+    avg: dict[str, dict[str, float]] = {}
+    for mode in RETRIEVAL_MODES:
+        name = mode["name"]
+        rows = [c["modes"][name] for c in per_case]
+        avg[name] = {
+            "precision_at_k": round(sum(r["precision_at_k"] for r in rows) / len(rows), 3),
+            "mrr": round(sum(r["mrr"] for r in rows) / len(rows), 3),
+            "ndcg_at_k": round(sum(r["ndcg_at_k"] for r in rows) / len(rows), 3),
+            "hit_at_k": round(sum(r["hit_at_k"] for r in rows) / len(rows), 3),
+        }
+    return {"per_case": per_case, "avg": avg}
+
+
+# ── Full per-case agent evaluation ───────────────────────────────────────────
+
+
+def _evaluate_case(case: EvalCase) -> dict:
+    """Run the agent + score all metrics for one case."""
+    agent = run_agent_with_metrics(case)
+    judge_q = _judge_question_for_case(case)
+
+    grounded = judge_groundedness(judge_q, agent["context"], agent["answer"])
+    relevancy = judge_answer_relevancy(judge_q, agent["answer"])
+    precision = judge_context_precision(judge_q, agent["chunks"])
+
+    mermaid = check_mermaid_validity(agent["mermaid_diagram"])
+    irac = check_irac_compliance(agent["irac_analysis"], intent=agent["intent"])
+
+    return {
+        "case_id": case["case_id"],
+        "query_family": case["query_family"],
+        "query": _eval_case_last_turn(case),
+        "intent": agent["intent"],
+        "node_trace": agent["node_trace"],
+        "latency_s": agent["latency_s"],
+        "source_diversity": agent["source_diversity"],
+        "answer": agent["answer"],
+        "groundedness": grounded,
+        "answer_relevancy": relevancy,
+        "context_precision": precision,
+        "mermaid_validity": mermaid,
+        "irac_compliance": irac,
+        "verification": agent["verification"],
+        "token_usage": agent["token_usage"],
+        "escalated_to": agent["escalated_to"],
+    }
+
+
+def run_evaluation(
+    output_dir: Path,
+    *,
+    skip_agent: bool = False,
+    skip_retrieval_modes: bool = False,
+    sample_size: int | None = None,
+    seed: int = 4205,
+) -> dict:
+    """Run the full eval. Writes JSON + plots to ``output_dir``. Returns summary."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cases = list(EVAL_CASES)
+    if sample_size is not None and sample_size < len(cases):
+        random.seed(seed)
+        cases = random.sample(cases, sample_size)
+
+    agent_results: list[dict] = []
+    if not skip_agent:
+        log.info("Running agent evaluation (%d cases)", len(cases))
+        for i, case in enumerate(cases, 1):
+            log.info("[%d/%d] %s", i, len(cases), case["case_id"])
+            try:
+                agent_results.append(_evaluate_case(case))
+            except Exception as e:  # one case shouldn't kill the suite
+                log.exception("case %s failed: %s", case["case_id"], e)
+                agent_results.append(
+                    {"case_id": case["case_id"], "query_family": case["query_family"], "error": str(e)}
+                )
+
+    retrieval_results: dict = {}
+    if not skip_retrieval_modes:
+        log.info("Running retrieval-mode comparison (%d cases × 4 modes)", len(cases))
+        retrieval_results = compare_retrieval_modes(cases)
+
+    summary = _compute_summary(agent_results, retrieval_results)
+    (output_dir / "eval_results.json").write_text(
+        json.dumps(
+            {"agent": agent_results, "retrieval_modes": retrieval_results, "summary": summary},
+            indent=2,
+            default=str,
+        )
+    )
+    _generate_plots(agent_results, retrieval_results, output_dir)
+    log.info("Wrote %s", output_dir / "eval_results.json")
+    return summary
+
+
+# ── Summary + plots ──────────────────────────────────────────────────────────
+
+
+def _avg(rows: list[dict], path: tuple[str, ...]) -> float | None:
+    """Mean of nested key path across rows; None when no row carries it."""
+    vals = []
+    for r in rows:
+        cur = r
+        for k in path:
+            cur = (cur or {}).get(k) if isinstance(cur, dict) else None
+        if isinstance(cur, (int, float)):
+            vals.append(float(cur))
+    return round(sum(vals) / len(vals), 3) if vals else None
+
+
+def _compute_summary(agent_results: list[dict], retrieval_results: dict) -> dict:
+    ok = [r for r in agent_results if "error" not in r]
+    summary: dict = {
+        "n_cases": len(agent_results),
+        "n_successful": len(ok),
+        "agent": {
+            "avg_groundedness": _avg(ok, ("groundedness", "score")),
+            "avg_answer_relevancy": _avg(ok, ("answer_relevancy", "score")),
+            "avg_precision_at_k": _avg(ok, ("context_precision", "precision_at_k")),
+            "avg_mrr": _avg(ok, ("context_precision", "mrr")),
+            "avg_ndcg_at_k": _avg(ok, ("context_precision", "ndcg_at_k")),
+            "avg_latency_s": _avg(ok, ("latency_s",)),
+            "avg_source_diversity": _avg(ok, ("source_diversity",)),
+            "avg_total_tokens": _avg(ok, ("token_usage", "total_tokens")),
+        },
+    }
+    by_family: dict[str, dict] = {}
+    for fam in sorted({r.get("query_family", "") for r in ok}):
+        fam_rows = [r for r in ok if r.get("query_family") == fam]
+        by_family[fam] = {
+            "n": len(fam_rows),
+            "avg_groundedness": _avg(fam_rows, ("groundedness", "score")),
+            "avg_precision_at_k": _avg(fam_rows, ("context_precision", "precision_at_k")),
+            "avg_mrr": _avg(fam_rows, ("context_precision", "mrr")),
+        }
+    summary["by_query_family"] = by_family
+
+    if retrieval_results:
+        summary["retrieval_modes"] = retrieval_results.get("avg", {})
+
+    return summary
+
+
+def _generate_plots(agent_results: list[dict], retrieval_results: dict, output_dir: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ok = [r for r in agent_results if "error" not in r]
+
+    # 1) Groundedness per case
+    if ok:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        labels = [r["case_id"] for r in ok]
+        scores = [(r.get("groundedness") or {}).get("score", 0) for r in ok]
+        ax.bar(labels, scores, color="#7a3b2e")
+        ax.set_ylim(0, 5)
+        ax.set_ylabel("Groundedness (1–5)")
+        ax.set_title("Per-case groundedness")
+        plt.xticks(rotation=45, ha="right")
+        fig.tight_layout()
+        fig.savefig(output_dir / "groundedness.png", dpi=120)
+        plt.close(fig)
+
+    # 2) Context precision metrics (precision@k, MRR, NDCG)
+    if ok:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        labels = [r["case_id"] for r in ok]
+        cp = [r.get("context_precision") or {} for r in ok]
+        p_at_k = [c.get("precision_at_k", 0) for c in cp]
+        mrr = [c.get("mrr", 0) for c in cp]
+        ndcg = [c.get("ndcg_at_k", 0) for c in cp]
+        x = list(range(len(labels)))
+        w = 0.27
+        ax.bar([i - w for i in x], p_at_k, w, label="P@k", color="#7a3b2e")
+        ax.bar(x, mrr, w, label="MRR", color="#c08070")
+        ax.bar([i + w for i in x], ndcg, w, label="NDCG@k", color="#e3b8a4")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        ax.set_ylim(0, 1)
+        ax.set_title("Context precision metrics per case")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(output_dir / "context_precision.png", dpi=120)
+        plt.close(fig)
+
+    # 3) Latency per case
+    if ok:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        labels = [r["case_id"] for r in ok]
+        lat = [r.get("latency_s", 0.0) for r in ok]
+        ax.bar(labels, lat, color="#4a5060")
+        ax.set_ylabel("Seconds")
+        ax.set_title("Per-case end-to-end latency")
+        plt.xticks(rotation=45, ha="right")
+        fig.tight_layout()
+        fig.savefig(output_dir / "latency.png", dpi=120)
+        plt.close(fig)
+
+    # 4) Retrieval-mode comparison (the headline lift)
+    avg = (retrieval_results or {}).get("avg") or {}
+    if avg:
+        mode_names = [m["name"] for m in RETRIEVAL_MODES]
+        metrics = ["precision_at_k", "mrr", "ndcg_at_k"]
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        x = list(range(len(mode_names)))
+        w = 0.27
+        colors = ["#7a3b2e", "#c08070", "#e3b8a4"]
+        for i, m in enumerate(metrics):
+            vals = [avg.get(name, {}).get(m, 0.0) for name in mode_names]
+            ax.bar([xi + (i - 1) * w for xi in x], vals, w, label=m, color=colors[i])
+        ax.set_xticks(x)
+        ax.set_xticklabels(mode_names, rotation=20, ha="right")
+        ax.set_ylim(0, 1)
+        ax.set_title("Retrieval mode comparison (mean over cases)")
+        ax.set_ylabel("Score (higher is better)")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(output_dir / "retrieval_modes.png", dpi=120)
+        plt.close(fig)
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run evaluation and ablation suite")
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="eval_results",
-        help="Directory to save results and plots",
-    )
-    parser.add_argument(
-        "--retrieval-pool-eval",
-        action="store_true",
-        help=(
-            "Re-run retrieval with a larger k (text+slides), judge all pool chunks, "
-            "and add recall-vs-pool. Much slower and more judge API calls."
-        ),
-    )
+    parser = argparse.ArgumentParser(description="LawGPT slim eval")
+    parser.add_argument("--output-dir", default="eval_results", type=Path)
+    parser.add_argument("--skip-agent", action="store_true")
+    parser.add_argument("--skip-retrieval-modes", action="store_true")
+    parser.add_argument("--sample", type=int, default=None, help="Run a random subset of N cases")
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir)
-    log.info("Starting evaluation suite — results will be saved to %s/", output_dir)
-
-    summary = run_evaluation(output_dir, retrieval_pool_eval=args.retrieval_pool_eval)
-
-    print("\n" + "=" * 60)
-    print("  EVALUATION SUMMARY")
-    print("=" * 60)
-    by_fam = summary.pop("by_query_family", {})
-    config_order = ["agent", "baseline", "ablation_mega_prompt"]
-    if "ablation_no_reranker" in summary:
-        config_order.append("ablation_no_reranker")
-    for config in config_order:
-        metrics = summary[config]
-        print(f"\n  {config}:")
-        print(f"    Avg Groundedness:       {metrics['avg_groundedness']}/5.0")
-        print(f"    Avg Answer Relevancy:   {metrics['avg_answer_relevancy']}/5.0")
-        print(f"    Avg Mermaid Validity:   {metrics['avg_mermaid_validity']*100:.0f}%")
-        print(f"    Avg IRAC Compliance:    {metrics['avg_irac_compliance']*100:.0f}%")
-        if "avg_context_precision" in metrics:
-            print(f"    Avg Context Precision:  {metrics['avg_context_precision']}")
-        retrieval_configs = ("agent", "ablation_mega_prompt", "ablation_no_reranker")
-        if config in retrieval_configs and "avg_mrr" in metrics:
-            print(f"    Avg MRR / Hit@K / NDCG: {metrics['avg_mrr']} / {metrics['avg_hit_at_k']} / {metrics['avg_ndcg_at_k']}")
-        if config in retrieval_configs and metrics.get("avg_recall_vs_pool") is not None:
-            print(f"    Avg recall vs pool:     {metrics['avg_recall_vs_pool']}")
-        print(f"    Avg Latency:            {metrics['avg_latency_s']}s")
-        print(f"    Avg Source Diversity:    {metrics['avg_source_diversity']}")
-        if "total_tokens" in metrics:
-            print(f"    Total Tokens:           {metrics['total_tokens']:,}")
-            print(f"    Avg Tokens/Query:       {metrics['avg_tokens_per_query']:,}")
-        if "avg_node_latencies" in metrics:
-            print(f"    Node Latencies:         {metrics['avg_node_latencies']}")
-
-    if by_fam:
-        print("\n  By query family (full agent):")
-        for fam, block in by_fam.items():
-            print(f"    {fam}: groundedness {block['agent_avg_groundedness']}/5, "
-                  f"relevancy {block['agent_avg_answer_relevancy']}/5, "
-                  f"n={block['case_count']}")
-            if block.get("fraction_cases_with_text_and_slides_retrieved") is not None:
-                print(
-                    "      cross-modal both text+slides retrieved: "
-                    f"{block['fraction_cases_with_text_and_slides_retrieved']:.0%} of cases"
-                )
+    summary = run_evaluation(
+        output_dir=args.output_dir,
+        skip_agent=args.skip_agent,
+        skip_retrieval_modes=args.skip_retrieval_modes,
+        sample_size=args.sample,
+    )
+    print(json.dumps(summary, indent=2, default=str))
 
 
 if __name__ == "__main__":

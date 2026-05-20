@@ -6,12 +6,19 @@ API reference: https://docs.zeroentropy.dev/api-reference/models/embed
 from __future__ import annotations
 
 import os
+import threading
+from collections import OrderedDict
 from typing import List
 
 import requests
 from langchain_core.embeddings import Embeddings
 
 from src.config import EMBEDDING_DIMENSIONS, EMBEDDING_MODEL
+
+# Hybrid retrieval calls embed_query twice per turn (once for the text leg,
+# once for the slides leg) with the same query string. Holding a tiny LRU on
+# the embeddings instance collapses those into one ZeroEntropy round-trip.
+_QUERY_CACHE_MAX = 16
 
 ZEROENTROPY_EMBED_URL = "https://api.zeroentropy.dev/v1/models/embed"
 
@@ -41,6 +48,8 @@ class ZeroEntropyEmbeddings(Embeddings):
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        self._query_cache: "OrderedDict[tuple[str, int], list[float]]" = OrderedDict()
+        self._query_cache_lock = threading.Lock()
 
     def _embed(self, texts: list[str], input_type: str) -> list[list[float]]:
         """Call the ZeroEntropy embed endpoint."""
@@ -70,5 +79,23 @@ class ZeroEntropyEmbeddings(Embeddings):
         return self._embed(texts, input_type="document")
 
     def embed_query(self, text: str) -> List[float]:
-        """Embed a single query string (used during retrieval)."""
-        return self._embed([text], input_type="query")[0]
+        """Embed a single query string (used during retrieval).
+
+        Memoised via a small per-instance LRU so the dense leg of hybrid
+        retrieval doesn't pay ZeroEntropy twice when ``retrieve_texts`` and
+        ``retrieve_slides`` are called back-to-back with the same query.
+        The lock dedupes concurrent calls (parallel text+slides legs hitting
+        the same key) into one HTTP round-trip.
+        """
+        key = (text, self.dimensions)
+        with self._query_cache_lock:
+            cached = self._query_cache.get(key)
+            if cached is not None:
+                self._query_cache.move_to_end(key)
+                return cached
+        vec = self._embed([text], input_type="query")[0]
+        with self._query_cache_lock:
+            self._query_cache[key] = vec
+            if len(self._query_cache) > _QUERY_CACHE_MAX:
+                self._query_cache.popitem(last=False)
+        return vec

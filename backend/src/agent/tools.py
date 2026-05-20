@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import chromadb
 from dotenv import load_dotenv
@@ -194,6 +196,7 @@ def _hybrid_search(
     fetch_bm25: int,
     fused_k: int,
     namespace: str | None,
+    timings: dict | None = None,
 ) -> list[RetrievedDocument]:
     """Dense MMR + BM25 fused via RRF, returning the top-``fused_k`` docs.
 
@@ -205,6 +208,7 @@ def _hybrid_search(
 
     # Dense leg (MMR over a larger pool — RRF benefits from candidate breadth).
     store = _get_vectorstore()
+    t0 = time.perf_counter()
     dense_results = store.max_marginal_relevance_search(
         query,
         k=fetch_dense,
@@ -212,6 +216,7 @@ def _hybrid_search(
         lambda_mult=MMR_LAMBDA,
         filter=where_filter,
     )
+    dense_ms = (time.perf_counter() - t0) * 1000
 
     by_id: dict[str, RetrievedDocument] = {}
     dense_ranked: list[str] = []
@@ -234,7 +239,9 @@ def _hybrid_search(
     if where_filter:
         bm25_where = _chroma_filter_to_meta(where_filter)
     bm25_index = get_bm25_index(namespace)
+    t1 = time.perf_counter()
     bm25_hits = bm25_index.search(query, k=fetch_bm25, where=bm25_where)
+    bm25_ms = (time.perf_counter() - t1) * 1000
     bm25_ranked: list[str] = []
     for doc_id, _score in bm25_hits:
         bm25_ranked.append(doc_id)
@@ -262,12 +269,17 @@ def _hybrid_search(
         if doc_id in by_id:
             top.append(by_id[doc_id])
     log.info(
-        "hybrid: dense=%d bm25=%d fused=%d (ns=%s)",
+        "hybrid: dense=%d bm25=%d fused=%d (ns=%s) dense_ms=%.1f bm25_ms=%.1f",
         len(dense_ranked),
         len(bm25_ranked),
         len(top),
         namespace,
+        dense_ms,
+        bm25_ms,
     )
+    if timings is not None:
+        timings["dense_ms"] = round(dense_ms, 1)
+        timings["bm25_ms"] = round(bm25_ms, 1)
     return top
 
 
@@ -317,6 +329,7 @@ def _maybe_rerank(
     docs: list[RetrievedDocument],
     top_k: int,
     use_reranker: bool,
+    timings: dict | None = None,
 ) -> list[RetrievedDocument]:
     """Apply the cross-encoder reranker when enabled, else truncate to top_k."""
     if not use_reranker:
@@ -325,7 +338,11 @@ def _maybe_rerank(
         from src.agent.reranker import get_reranker
 
         reranker = get_reranker()
-        return reranker.rerank(query, docs, top_k=top_k)
+        t0 = time.perf_counter()
+        out = reranker.rerank(query, docs, top_k=top_k)
+        if timings is not None:
+            timings["rerank_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+        return out
     except Exception as e:  # pragma: no cover — graceful fallback
         log.warning("Reranker unavailable (%s); falling back to MMR order", e)
         return docs[:top_k]
@@ -338,6 +355,7 @@ def retrieve_texts(
     strategy: str | None = None,
     use_reranker: bool | None = None,
     namespace: str | None = None,
+    timings: dict | None = None,
 ) -> list[RetrievedDocument]:
     """Retrieve text chunks (readings, tutorials, supplementary) from the KB.
 
@@ -359,6 +377,8 @@ def retrieve_texts(
     rerank_on = USE_RERANKER if use_reranker is None else bool(use_reranker)
     fetch_k = RERANKER_FETCH_K_TEXT if rerank_on else k
 
+    leg_timings: dict[str, float] = {}
+    t_total = time.perf_counter()
     if USE_HYBRID_RETRIEVAL:
         docs = _hybrid_search(
             query,
@@ -367,6 +387,7 @@ def retrieve_texts(
             fetch_bm25=BM25_FETCH_K_TEXT,
             fused_k=HYBRID_FUSED_K_TEXT,
             namespace=namespace,
+            timings=leg_timings,
         )
         log.info(
             "retrieve_texts [hybrid, rerank=%s]: %d fused (week=%s, ns=%s)",
@@ -376,8 +397,10 @@ def retrieve_texts(
             namespace,
         )
     else:
+        t_d = time.perf_counter()
         store = _get_vectorstore()
         results = _search(store, query, k=fetch_k, where_filter=where_filter, strategy=strategy)
+        leg_timings["dense_ms"] = round((time.perf_counter() - t_d) * 1000, 1)
         log.info(
             "retrieve_texts [%s, rerank=%s]: %d candidates (week=%s)",
             strategy or RETRIEVAL_STRATEGY,
@@ -386,7 +409,12 @@ def retrieve_texts(
             week,
         )
         docs = _raw_to_retrieved(results)
-    return _maybe_rerank(query, docs, top_k=k, use_reranker=rerank_on)
+    out = _maybe_rerank(query, docs, top_k=k, use_reranker=rerank_on, timings=leg_timings)
+    leg_timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
+    if timings is not None:
+        for k_, v in leg_timings.items():
+            timings[f"text_{k_}"] = v
+    return out
 
 
 def retrieve_slides(
@@ -396,6 +424,7 @@ def retrieve_slides(
     strategy: str | None = None,
     use_reranker: bool | None = None,
     namespace: str | None = None,
+    timings: dict | None = None,
 ) -> list[RetrievedDocument]:
     """Retrieve lecture slide descriptions from the KB.
 
@@ -414,6 +443,8 @@ def retrieve_slides(
     rerank_on = USE_RERANKER if use_reranker is None else bool(use_reranker)
     fetch_k = RERANKER_FETCH_K_SLIDES if rerank_on else k
 
+    leg_timings: dict[str, float] = {}
+    t_total = time.perf_counter()
     if USE_HYBRID_RETRIEVAL:
         docs = _hybrid_search(
             query,
@@ -422,6 +453,7 @@ def retrieve_slides(
             fetch_bm25=BM25_FETCH_K_SLIDES,
             fused_k=HYBRID_FUSED_K_SLIDES,
             namespace=namespace,
+            timings=leg_timings,
         )
         log.info(
             "retrieve_slides [hybrid, rerank=%s]: %d fused (week=%s, ns=%s)",
@@ -431,8 +463,10 @@ def retrieve_slides(
             namespace,
         )
     else:
+        t_d = time.perf_counter()
         store = _get_vectorstore()
         results = _search(store, query, k=fetch_k, where_filter=where_filter, strategy=strategy)
+        leg_timings["dense_ms"] = round((time.perf_counter() - t_d) * 1000, 1)
         log.info(
             "retrieve_slides [%s, rerank=%s]: %d candidates (week=%s)",
             strategy or RETRIEVAL_STRATEGY,
@@ -441,7 +475,12 @@ def retrieve_slides(
             week,
         )
         docs = _raw_to_retrieved(results)
-    return _maybe_rerank(query, docs, top_k=k, use_reranker=rerank_on)
+    out = _maybe_rerank(query, docs, top_k=k, use_reranker=rerank_on, timings=leg_timings)
+    leg_timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
+    if timings is not None:
+        for k_, v in leg_timings.items():
+            timings[f"slides_{k_}"] = v
+    return out
 
 
 def retrieve_all(
@@ -451,12 +490,44 @@ def retrieve_all(
     k_slides: int = 4,
     use_reranker: bool | None = None,
     namespace: str | None = None,
+    timings: dict | None = None,
 ) -> tuple[list[RetrievedDocument], list[RetrievedDocument]]:
-    """Convenience wrapper that retrieves both text and slides in one call."""
-    texts = retrieve_texts(
-        query, week=week, k=k_text, use_reranker=use_reranker, namespace=namespace
-    )
-    slides = retrieve_slides(
-        query, week=week, k=k_slides, use_reranker=use_reranker, namespace=namespace
-    )
+    """Retrieve text and slide chunks concurrently.
+
+    The two legs are independent (different metadata filters, different
+    candidate pools) and each performs blocking I/O (ZeroEntropy embed,
+    Chroma query, BM25 in-memory search, Cohere rerank REST call). Running
+    them in a 2-worker thread pool halves the wall-clock spent in retrieval
+    on the typical hot path. Embeddings are deduped by a thread-safe LRU
+    on the ZeroEntropyEmbeddings singleton (see src/embeddings.py).
+    """
+    t_dict: dict[str, float] = {}
+    s_dict: dict[str, float] = {}
+    t_start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="retrieve") as ex:
+        ft = ex.submit(
+            retrieve_texts,
+            query,
+            week=week,
+            k=k_text,
+            use_reranker=use_reranker,
+            namespace=namespace,
+            timings=t_dict,
+        )
+        fs = ex.submit(
+            retrieve_slides,
+            query,
+            week=week,
+            k=k_slides,
+            use_reranker=use_reranker,
+            namespace=namespace,
+            timings=s_dict,
+        )
+        texts = ft.result()
+        slides = fs.result()
+    parallel_ms = round((time.perf_counter() - t_start) * 1000, 1)
+    if timings is not None:
+        timings.update(t_dict)
+        timings.update(s_dict)
+        timings["retrieve_all_parallel_ms"] = parallel_ms
     return texts, slides
