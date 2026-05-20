@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ExternalLink, FileText, Image as ImageIcon, X } from 'lucide-react';
 
@@ -36,15 +37,36 @@ const POPOVER_H = 220;
 const GUTTER = 12;
 const MOBILE_BREAKPOINT = 640;
 
-function useViewport() {
-  const [size, setSize] = useState(() => ({
-    w: typeof window !== 'undefined' ? window.innerWidth : 1024,
-    h: typeof window !== 'undefined' ? window.innerHeight : 768,
-  }));
+// Singleton viewport store: every popover subscribes to the same size
+// instead of attaching its own resize listener. Avoids piling up listeners
+// when many chips rapidly mount/unmount during streaming.
+type ViewportSize = { w: number; h: number };
+const VP_LISTENERS = new Set<(s: ViewportSize) => void>();
+let VP_BOUND = false;
+let VP_SIZE: ViewportSize =
+  typeof window !== 'undefined'
+    ? { w: window.innerWidth, h: window.innerHeight }
+    : { w: 1024, h: 768 };
+
+function bindViewport() {
+  if (VP_BOUND || typeof window === 'undefined') return;
+  VP_BOUND = true;
+  const onResize = () => {
+    VP_SIZE = { w: window.innerWidth, h: window.innerHeight };
+    VP_LISTENERS.forEach((fn) => fn(VP_SIZE));
+  };
+  window.addEventListener('resize', onResize, { passive: true });
+}
+
+function useViewport(): ViewportSize {
+  const [size, setSize] = useState<ViewportSize>(VP_SIZE);
   useEffect(() => {
-    const onResize = () => setSize({ w: window.innerWidth, h: window.innerHeight });
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    bindViewport();
+    VP_LISTENERS.add(setSize);
+    setSize(VP_SIZE);
+    return () => {
+      VP_LISTENERS.delete(setSize);
+    };
   }, []);
   return size;
 }
@@ -71,7 +93,14 @@ export function CitationPopover({
     if (!isPinned) return;
     const onDown = (e: MouseEvent) => {
       if (!ref.current) return;
-      if (!ref.current.contains(e.target as Node)) onClose();
+      const target = e.target as Element | null;
+      if (!target) return;
+      // Ignore clicks on the popover itself or on any citation chip — the
+      // chip's onClick already handles toggle / swap; if we dismissed here
+      // the click handler would just re-pin and the popover would flicker.
+      if (ref.current.contains(target)) return;
+      if (target.closest('[data-source-index]')) return;
+      onClose();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -105,10 +134,16 @@ export function CitationPopover({
     return { left, top, wantsBelow };
   }, [anchor, viewportW, viewportH]);
 
+  // Portal so ``position: fixed`` is anchored to the viewport, not to the
+  // nearest ``transform``ed ancestor — ChatMessage's motion.div applies a
+  // transform during entrance, which would otherwise re-root fixed
+  // children and push the popover offscreen.
+  if (typeof document === 'undefined') return null;
+
   // Mobile pinned → bottom sheet. Touch hover is unreliable so we only
   // render the sheet variant for pinned interaction.
   if (isMobile && isPinned) {
-    return (
+    return createPortal(
       <AnimatePresence>
         <motion.div
           key="backdrop"
@@ -142,11 +177,12 @@ export function CitationPopover({
             variant="sheet"
           />
         </motion.div>
-      </AnimatePresence>
+      </AnimatePresence>,
+      document.body,
     );
   }
 
-  return (
+  return createPortal(
     <motion.div
       ref={ref}
       initial={{ opacity: 0, y: place.wantsBelow ? -2 : 2, scale: 0.98 }}
@@ -169,7 +205,8 @@ export function CitationPopover({
         onOpenInPanel={onOpenInPanel}
         variant={isPinned ? 'pinned' : 'hover'}
       />
-    </motion.div>
+    </motion.div>,
+    document.body,
   );
 }
 
