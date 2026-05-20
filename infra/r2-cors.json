@@ -1,0 +1,20 @@
+[
+  {
+    "AllowedOrigins": [
+      "https://lawgpt-15s.pages.dev",
+      "http://localhost:3000"
+    ],
+    "AllowedMethods": ["PUT", "GET", "HEAD"],
+    "AllowedHeaders": [
+      "content-type",
+      "content-length",
+      "authorization",
+      "x-amz-content-sha256",
+      "x-amz-date",
+      "x-amz-user-agent",
+      "x-amz-acl"
+    ],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3600
+  }
+]
