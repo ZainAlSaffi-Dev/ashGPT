@@ -106,6 +106,14 @@ def _format_context(state: AgentState) -> str:
     return "\n".join(sections) if sections else "(No context retrieved.)"
 
 
+def _retrieved_chunk_ids(state: AgentState) -> list[str]:
+    """Stable per-chunk identifiers for cache keying. Matches graph._chunk_ids_from."""
+    ids: list[str] = []
+    for d in (state.get("retrieved_texts") or []) + (state.get("retrieved_slides") or []):
+        ids.append(d.get("source") or (d.get("content") or "")[:80])
+    return ids
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # NODE 1: ROUTER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -236,6 +244,66 @@ def retrieval_node(state: AgentState) -> dict:
         "retrieved_slides": slides,
         "node_trace": _append_trace(state, "retrieval"),
         "_timing_sub": sub_timings or None,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NODE 2.5: CACHE LOOKUP (post-retrieval short-circuit)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@_timed("cache_check")
+def cache_check_node(state: AgentState) -> dict:
+    """Look up a cached final answer keyed by (user_id, normalised_query, chunk_ids).
+
+    Runs after retrieval so the chunk-id-aware key matches exactly what
+    ``run_query`` writes on completion. On hit, returns the cached
+    ``final_answer`` and signals ``cache_hit=True``; the conditional edge in
+    :mod:`src.agent.graph` then routes straight to END, skipping every
+    reasoning + verification LLM call. Disabled when chat_history is set
+    (multi-turn reasoning bypass) or when ``user_id`` is unset (legacy/shared
+    collection — no tenant scope to key against).
+    """
+    from src.config import USE_ANSWER_CACHE
+
+    user_id = state.get("user_id")
+    history = get_chat_history(state)
+    if not USE_ANSWER_CACHE or not user_id or history:
+        return {"cache_hit": False, "node_trace": _append_trace(state, "cache_check")}
+
+    from src.agent.cache import get as cache_get
+    from src.agent.cache import make_cache_key
+
+    chunk_ids = _retrieved_chunk_ids(state)
+    if not chunk_ids:
+        return {"cache_hit": False, "node_trace": _append_trace(state, "cache_check")}
+
+    cache_key = make_cache_key(user_id, state["query"], chunk_ids)
+
+    import asyncio
+
+    try:
+        hit = asyncio.run(cache_get(cache_key))
+    except RuntimeError:
+        # Already inside an event loop (e.g. FastAPI thread executor calls
+        # `loop.run_in_executor` → run_query is sync but the parent loop may
+        # leak in via newer Python asyncio). Fall through as a miss rather
+        # than raise.
+        hit = None
+    except Exception as e:  # pragma: no cover — cache failure should never block
+        log.warning("cache lookup failed (%s); treating as miss", e)
+        hit = None
+
+    if not hit:
+        return {"cache_hit": False, "node_trace": _append_trace(state, "cache_check")}
+
+    log.info("cache HIT user=%s key=%s", user_id, cache_key[:12])
+    return {
+        "cache_hit": True,
+        "final_answer": hit.get("answer", ""),
+        "intent": hit.get("intent") or state.get("intent", "general"),
+        "verification_report": hit.get("verification_report"),
+        "node_trace": _append_trace(state, "cache_check"),
     }
 
 
