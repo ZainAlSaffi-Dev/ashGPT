@@ -216,15 +216,29 @@ def run_query(
         result = _maybe_escalate(result)
 
     if cache_on and user_id and not prepared:
-        # Fire-and-forget cache write. Failures don't affect the response.
-        try:
-            import asyncio
-
-            asyncio.run(_cache_write_safe(result, query, user_id))
-        except Exception as e:  # pragma: no cover
-            log.warning("cache write failed: %s", e)
+        # Fire-and-forget cache write on a daemon thread so the D1/SQLite
+        # round-trip never blocks the response. ``asyncio.run`` creates a
+        # fresh event loop in that thread, isolated from any caller loop
+        # (FastAPI threadpool executors, eval harness, Streamlit).
+        _spawn_cache_write(result, query, user_id)
 
     return result
+
+
+def _spawn_cache_write(result: AgentState, query: str, user_id: str) -> None:
+    """Background daemon thread runs the cache put — never blocks return."""
+    import asyncio
+    import threading
+
+    snapshot = dict(result)
+
+    def _run() -> None:
+        try:
+            asyncio.run(_cache_write_safe(snapshot, query, user_id))
+        except Exception as e:  # pragma: no cover — cache failure must not surface
+            log.warning("cache write failed: %s", e)
+
+    threading.Thread(target=_run, name="cache-write", daemon=True).start()
 
 
 def _chunk_ids_from(result: AgentState) -> list[str]:
