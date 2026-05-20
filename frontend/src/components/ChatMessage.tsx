@@ -7,7 +7,7 @@ import remarkGfm from 'remark-gfm';
 
 import { ChatMessageBody } from './ChatMessageBody';
 import { CitationContext, type CitationTarget } from './citation-context';
-import { CitationPopover } from './CitationPopover';
+import { CitationPopover, type CitationAnchor } from './CitationPopover';
 import { MermaidRenderer } from './MermaidRenderer';
 import { SourcePanel } from './SourcePanel';
 import { rehypeCitations } from '@/lib/rehype-citations';
@@ -127,7 +127,21 @@ export function ChatMessage({ turn }: Props) {
           </section>
         )}
         {turn.sources && (
-          <SourcePanel sources={turn.sources} highlightedIndex={highlightedSource} />
+          <SourcePanel
+            sources={turn.sources}
+            highlightedIndex={highlightedSource}
+            onSelectSource={(idx, anchor: CitationAnchor) => {
+              clearTimers();
+              setHover(null);
+              setHighlightedSource(idx - 1);
+              setPinned({
+                occurrence: `panel-${idx}`,
+                idx,
+                anchor,
+                context: '',
+              });
+            }}
+          />
         )}
         {turn.verification && turn.verification.all_supported === false && (
           <p className="mt-2 text-xs text-accent">
