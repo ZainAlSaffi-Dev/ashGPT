@@ -1,11 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { motion } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
 
+import { CitationPopover } from './CitationPopover';
 import { MermaidRenderer } from './MermaidRenderer';
 import { SourcePanel } from './SourcePanel';
 import { rehypeCitations } from '@/lib/rehype-citations';
@@ -24,6 +25,13 @@ export function ChatMessage({ turn }: Props) {
   // Track the citation the user most recently clicked so SourcePanel opens
   // and highlights the matching row.
   const [highlightedSource, setHighlightedSource] = useState<number | null>(null);
+  // Floating popover anchored on the citation button. ``idx`` is 1-based
+  // (S1, S2, …) so it can drive both the SourcePanel highlight (idx-1) and
+  // the popover header label directly.
+  const [popover, setPopover] = useState<{
+    idx: number;
+    anchor: { x: number; y: number; width: number };
+  } | null>(null);
 
   return (
     <motion.div
@@ -56,13 +64,31 @@ export function ChatMessage({ turn }: Props) {
                   data-source-index={idx}
                   onClick={(e) => {
                     e.preventDefault();
+                    e.stopPropagation();
                     setHighlightedSource(idx - 1);
-                    document
-                      .getElementById(`source-${idx}`)
-                      ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    // Click a second time on the same chip → close. Click
+                    // a different chip → swap to that one.
+                    if (popover && popover.idx === idx) {
+                      setPopover(null);
+                      return;
+                    }
+                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    setPopover({
+                      idx,
+                      anchor: {
+                        x: rect.left,
+                        y: rect.bottom,
+                        width: rect.width,
+                      },
+                    });
                   }}
-                  className="not-italic mx-0.5 inline-flex items-center rounded bg-accent/15 px-1.5 py-0.5 align-baseline text-[0.7em] font-semibold text-accent transition hover:bg-accent hover:text-parchment"
-                  title={`Open source S${idx}`}
+                  className={cn(
+                    'not-italic mx-0.5 inline-flex items-center rounded px-1.5 py-0.5 align-baseline text-[0.7em] font-semibold transition',
+                    popover?.idx === idx
+                      ? 'bg-accent text-parchment'
+                      : 'bg-accent/15 text-accent hover:bg-accent hover:text-parchment',
+                  )}
+                  title={`Show source S${idx}`}
                 >
                   {props.children}
                 </button>
@@ -131,6 +157,24 @@ export function ChatMessage({ turn }: Props) {
           {turn.intent ?? 'general'} · {turn.latency_ms} ms
         </p>
       )}
+      <AnimatePresence>
+        {popover && turn.sources && turn.sources[popover.idx - 1] && (
+          <CitationPopover
+            key={popover.idx}
+            index={popover.idx}
+            source={turn.sources[popover.idx - 1]}
+            anchor={popover.anchor}
+            onClose={() => setPopover(null)}
+            onOpenInPanel={() => {
+              setHighlightedSource(popover.idx - 1);
+              document
+                .getElementById(`source-${popover.idx}`)
+                ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+              setPopover(null);
+            }}
+          />
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }

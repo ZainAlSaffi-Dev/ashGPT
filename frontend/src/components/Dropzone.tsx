@@ -1,8 +1,9 @@
 'use client';
 
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { CloudUpload, Loader2, RotateCcw } from 'lucide-react';
+import { motion } from 'framer-motion';
 import { useAuth } from '@clerk/nextjs';
 
 import { presignUpload, processUpload, uploadBlob } from '@/lib/api';
@@ -141,6 +142,25 @@ export function Dropzone({ onComplete }: Props) {
     multiple: true,
   });
 
+  // Aggregate progress across the batch. ``done`` covers terminal states
+  // (ready + failed) so a failure still moves the bar forward — the user
+  // can retry the row directly.
+  const summary = useMemo(() => {
+    if (uploads.length === 0) return null;
+    const total = uploads.length;
+    const ready = uploads.filter((u) => u.state === 'ready').length;
+    const failed = uploads.filter((u) => u.state === 'failed').length;
+    const processing = uploads.filter((u) => u.state === 'processing').length;
+    const inflight = total - ready - failed;
+    const done = ready + failed;
+    const pct = Math.round((done / total) * 100);
+    return { total, ready, failed, processing, inflight, pct };
+  }, [uploads]);
+
+  const clearFinished = useCallback(() => {
+    setUploads((u) => u.filter((x) => x.state !== 'ready' && x.state !== 'failed'));
+  }, []);
+
   return (
     <div className="space-y-3">
       <div
@@ -157,6 +177,50 @@ export function Dropzone({ onComplete }: Props) {
         </p>
         <p className="text-xs text-ink-soft">PDF · DOCX · TXT · MD · PNG · JPG (max 100 MB)</p>
       </div>
+      {summary && (
+        <div className="rounded-lg border border-parchment-warm bg-parchment px-3 py-2">
+          <div className="flex items-center justify-between text-xs text-ink-muted">
+            <span className="font-medium text-ink">
+              {summary.ready === summary.total
+                ? `All ${summary.total} file${summary.total === 1 ? '' : 's'} ready`
+                : `${summary.ready} of ${summary.total} ready`}
+              {summary.failed > 0 && (
+                <span className="ml-2 text-red-600">· {summary.failed} failed</span>
+              )}
+            </span>
+            <div className="flex items-center gap-3">
+              {summary.inflight > 0 && (
+                <span className="flex items-center gap-1">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  {summary.inflight} in flight
+                </span>
+              )}
+              {summary.inflight === 0 && (
+                <button
+                  type="button"
+                  onClick={clearFinished}
+                  className="rounded border border-parchment-warm px-1.5 py-0.5 text-[11px] text-ink-muted transition hover:bg-parchment-warm hover:text-ink"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-parchment-warm">
+            <motion.div
+              className={cn(
+                'h-full rounded-full',
+                summary.failed > 0 && summary.inflight === 0
+                  ? 'bg-red-400'
+                  : 'bg-accent',
+              )}
+              initial={{ width: 0 }}
+              animate={{ width: `${summary.pct}%` }}
+              transition={{ duration: 0.4, ease: 'easeOut' }}
+            />
+          </div>
+        </div>
+      )}
       {uploads.length > 0 && (
         <ul className="space-y-1 text-sm">
           {uploads.map((u) => (
