@@ -45,7 +45,9 @@ class MessageOut(BaseModel):
 class PresignRequest(BaseModel):
     name: str = Field(..., description="Original filename (used to derive extension)")
     mime: str
-    doc_type: Literal["note", "past_paper", "slide", "reading"] = "note"
+    # Free-form so callers can categorise (case, statute, note, past_paper,
+    # transcript, slide, …) without the backend imposing a fixed taxonomy.
+    doc_type: str = "document"
     week: str | None = None
 
 

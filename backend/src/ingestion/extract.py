@@ -83,25 +83,48 @@ def extract_text(path: str | Path) -> list[ExtractedSection]:
 # ── Images (VLM) ──────────────────────────────────────────────────────────────
 
 
+_MIME_BY_SUFFIX = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+}
+
+
+def _describe_image(image_path: Path) -> str:
+    """Send an image to the Gemini VLM and return its description."""
+    from google import genai
+    from google.genai import types
+
+    from src.config import SLIDE_DESCRIPTION_PROMPT, VLM_MODEL
+
+    with open(image_path, "rb") as f:
+        image_bytes = f.read()
+
+    mime = _MIME_BY_SUFFIX.get(image_path.suffix.lower(), "image/png")
+    client = genai.Client()
+    response = client.models.generate_content(
+        model=VLM_MODEL,
+        contents=[
+            SLIDE_DESCRIPTION_PROMPT,
+            types.Part.from_bytes(data=image_bytes, mime_type=mime),
+        ],
+    )
+    return response.text or ""
+
+
 def extract_image(path: str | Path) -> list[ExtractedSection]:
     """Run the Gemini VLM to describe an image. Returns one section.
 
     The original image path is stashed on ``meta.image_path`` so the agent can
     cite the source image in the UI.
     """
-    from google import genai
-
-    from src.indexing.build_index import describe_slide
-
-    client = genai.Client()
-    description = describe_slide(Path(path), client)
-    description = (description or "").strip()
+    description = _describe_image(Path(path)).strip()
     if not description:
         return []
     return [
         ExtractedSection(
             text=description,
-            meta={"image_path": str(path), "doc_type_hint": "slide"},
+            meta={"image_path": str(path), "doc_type_hint": "image"},
         )
     ]
 

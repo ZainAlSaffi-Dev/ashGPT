@@ -13,8 +13,7 @@ from pathlib import Path
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = BACKEND_ROOT / "data"
-CHROMA_DIR = BACKEND_ROOT / "chroma_db"
+DATA_DIR = BACKEND_ROOT / "data"  # legacy eval / coursework artefacts only
 
 # ── Embeddings ─────────────────────────────────────────────────────────────────
 EMBEDDING_MODEL = "zembed-1"
@@ -35,9 +34,6 @@ ABLATION_MODEL = "gpt-5.4-mini"             # Mega-prompt ablation (single LLM c
 
 JUDGE_DRAFT_MODEL = "gemini-3-flash-preview"  # Stage 1: initial judgment (different provider to avoid bias)
 JUDGE_CRITIQUE_MODEL = "gpt-5.4"            # Stage 2: critiques and finalises score
-
-# ── ChromaDB ───────────────────────────────────────────────────────────────────
-CHROMA_COLLECTION = "property_law_kb"
 
 # ── Chunking (tuned for legal text — preserves full paragraphs of ratio) ──────
 CHUNK_SIZE = 1500
@@ -100,13 +96,13 @@ CHAT_HISTORY_MAX_ASSISTANT_TAIL_CHARS = 1200
 EVAL_RETRIEVAL_POOL_K_TEXT = 20
 EVAL_RETRIEVAL_POOL_K_SLIDES = 10
 
-# ── VLM prompt for lecture slide description ──────────────────────────────────
+# ── VLM prompt for image / slide / diagram description ───────────────────────
 SLIDE_DESCRIPTION_PROMPT = (
-    "You are a legal education assistant. Describe this property law lecture "
-    "slide in detail. Include all visible text verbatim, any diagrams or "
-    "flowcharts, legal principles, case names, statutory references, and "
-    "definitions. Preserve the structure (headings, bullet points) as closely "
-    "as possible."
+    "You are a legal study assistant. Describe this image in detail. Include "
+    "all visible text verbatim, any diagrams, flowcharts, or tables, legal "
+    "principles, case names, statutory references, and definitions. Preserve "
+    "the structure (headings, bullet points) as closely as possible so the "
+    "description can be searched as if it were the original document."
 )
 
 
@@ -118,7 +114,7 @@ SLIDE_DESCRIPTION_PROMPT = (
 class _DefaultSettings:
     """Plain attribute container so tests can monkeypatch without a real env."""
 
-    # Storage backend selection: "local" (Chroma + filesystem + sqlite) or
+    # Storage backend selection: "local" (pgvector + filesystem + sqlite) or
     # "cloudflare" (Vectorize + R2 + D1).
     storage_backend: str = "local"
 
@@ -127,9 +123,9 @@ class _DefaultSettings:
     #   postgresql+psycopg://user:pass@host/db (local docker compose)
     database_url: str = "sqlite+aiosqlite:///./lawgpt.db"
 
-    # Vector store: "chroma" (local persistent), "pgvector" (Postgres + pgvector),
-    # or "vectorize" (Cloudflare Vectorize REST API).
-    vector_backend: str = "chroma"
+    # Vector store: "pgvector" (Postgres + pgvector, dev + prod default),
+    # "vectorize" (Cloudflare Vectorize REST API), or "memory" (tests).
+    vector_backend: str = "pgvector"
     vectorize_index_name: str = "lawgpt-vectors"
     vectorize_account_id: str = ""
     vectorize_api_token: str = ""

@@ -97,12 +97,17 @@ def _build_filter(
     doc_types: list[str] | None = None,
     namespace: str | None = None,
 ) -> dict | None:
-    """Build a ChromaDB where-filter from optional week, type, and namespace constraints.
+    """Build an intermediate where-filter from optional metadata constraints.
 
-    Namespace is the user's tenant id. When ``None`` no namespace filter is
-    applied (backwards-compat with the legacy shared collection used by the
-    coursework eval); when set, only chunks tagged with ``metadata.namespace``
-    matching are returned.
+    All arguments are optional. The retrieval pipeline now targets a user's
+    own ingested corpus rather than a coursework-baked KB, so doc_types and
+    week are opt-in scoping hooks (used by exam-by-week or "only my readings"
+    flows). Namespace isolation is enforced by the vector store at the SQL
+    layer regardless of whether it appears in this filter.
+
+    Returns the ``{"$and": [...]}`` Chroma-flavoured intermediate; downstream
+    callers flatten via ``_chroma_filter_to_meta`` before forwarding to the
+    factory's where-builder.
     """
     conditions: list[dict] = []
 
@@ -384,22 +389,24 @@ def retrieve_texts(
     use_reranker: bool | None = None,
     namespace: str | None = None,
     timings: dict | None = None,
+    doc_types: list[str] | None = None,
 ) -> list[RetrievedDocument]:
-    """Retrieve text chunks (readings, tutorials, supplementary) from the KB.
+    """Retrieve text chunks from the user's ingested corpus.
 
-    Excludes lecture slides so that text and image modalities remain separate
-    in the state, allowing independent processing by downstream nodes.
+    Image-typed chunks (with ``image_path`` set) are post-filtered out so the
+    text channel stays distinct from ``retrieve_slides``. No doc_type
+    whitelist is applied by default — pass ``doc_types`` to scope (e.g. exam
+    flow restricting to past papers).
 
     Args:
         strategy: Override the global RETRIEVAL_STRATEGY for ablation.
         use_reranker: Override the global USE_RERANKER (eval ablation hook).
-            When True, MMR fetches ``RERANKER_FETCH_K_TEXT`` candidates and a
-            cross-encoder reduces them to ``k``.
-        namespace: User tenant id; when set, restricts to chunks tagged with
-            ``metadata.namespace`` matching. ``None`` searches all chunks
-            (legacy/shared collection).
+            When True, retrieval fetches ``RERANKER_FETCH_K_TEXT`` candidates
+            and a cross-encoder reduces them to ``k``.
+        namespace: User tenant id; the vector store always filters by
+            namespace at the SQL layer when this is set.
+        doc_types: Optional metadata filter — useful for exam-scoped flows.
     """
-    doc_types = ["reading", "tutorial", "supplementary", "note"]
     where_filter = _build_filter(week=week, doc_types=doc_types, namespace=namespace)
 
     rerank_on = USE_RERANKER if use_reranker is None else bool(use_reranker)
@@ -440,6 +447,9 @@ def retrieve_texts(
             week,
         )
         docs = _hits_to_retrieved(hits)
+    # Keep text channel pure: drop chunks that came from image ingestion
+    # (VLM-described slide pages) so retrieve_slides owns that modality.
+    docs = [d for d in docs if not d.get("image_path")]
     out = _maybe_rerank(query, docs, top_k=k, use_reranker=rerank_on, timings=leg_timings)
     leg_timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
     if timings is not None:
@@ -457,19 +467,20 @@ def retrieve_slides(
     namespace: str | None = None,
     timings: dict | None = None,
 ) -> list[RetrievedDocument]:
-    """Retrieve lecture slide descriptions from the KB.
+    """Retrieve image-bearing chunks (e.g. VLM-described slide / diagram pages).
 
-    Returns slides whose VLM-generated descriptions are semantically similar
-    to the query. Each result carries an image_path for reference.
+    Selected by the presence of ``image_path`` in chunk metadata rather than
+    a doc_type whitelist — the generalised ingestion pipeline tags any image
+    or VLM-extracted page with ``image_path`` regardless of how the user
+    classified the document. Returns nothing if the user hasn't uploaded any
+    image-bearing material.
 
     Args:
         strategy: Override the global RETRIEVAL_STRATEGY for ablation.
         use_reranker: Override the global USE_RERANKER (eval ablation hook).
         namespace: User tenant id (see ``retrieve_texts``).
     """
-    where_filter = _build_filter(
-        week=week, doc_types=["lecture_slide", "slide"], namespace=namespace
-    )
+    where_filter = _build_filter(week=week, namespace=namespace)
 
     rerank_on = USE_RERANKER if use_reranker is None else bool(use_reranker)
     fetch_k = RERANKER_FETCH_K_SLIDES if rerank_on else k
@@ -509,6 +520,9 @@ def retrieve_slides(
             week,
         )
         docs = _hits_to_retrieved(hits)
+    # Slide channel = anything with an image_path. Filter post-fetch since
+    # the factory's where-builder doesn't support IS NOT NULL on JSONB.
+    docs = [d for d in docs if d.get("image_path")]
     out = _maybe_rerank(query, docs, top_k=k, use_reranker=rerank_on, timings=leg_timings)
     leg_timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
     if timings is not None:

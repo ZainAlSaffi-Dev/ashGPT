@@ -37,7 +37,7 @@ async def ingest_file(
     blob_key: str,
     mime: str,
     week: str | None = None,
-    doc_type: str = "note",
+    doc_type: str = "document",
 ) -> int:
     """Ingest one file end-to-end. Returns the chunk count."""
     blob = make_blob_store()
@@ -124,13 +124,17 @@ async def ingest_file(
 def _doc_type_for_storage(
     declared: str, section: ExtractedSection, is_image: bool
 ) -> str:
-    """Promote ``doc_type`` to ``lecture_slide`` for image sections so the
-    existing slide-channel retrieval still finds them; otherwise honour the
-    user-declared type."""
-    if is_image:
-        return "lecture_slide"
+    """Resolve the metadata ``type`` to stamp on this section.
+
+    Honour ingestion hints (``section.meta.doc_type_hint``) before falling
+    back to the caller-declared ``doc_type``. Image modality is conveyed via
+    ``metadata.image_path`` (set in ``extract_image``) so the slide-channel
+    retrieval no longer relies on a special string here.
+    """
     if section.meta.get("doc_type_hint"):
         return section.meta["doc_type_hint"]
+    if is_image:
+        return "image"
     return declared
 
 
@@ -141,7 +145,7 @@ def ingest_file_sync(
     blob_key: str,
     mime: str,
     week: str | None = None,
-    doc_type: str = "note",
+    doc_type: str = "document",
 ) -> int:
     import asyncio
 
