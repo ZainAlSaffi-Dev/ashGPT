@@ -46,6 +46,13 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npx vitest run
+      - name: Next.js build (validates production bundle)
+        env:
+          # Clerk key intentionally omitted — layout.tsx falls back to a
+          # no-provider tree when missing, so the build can complete without
+          # secrets. Production secrets live in Cloudflare Pages env.
+          NEXT_PUBLIC_API_BASE: http://localhost:8000
+        run: npm run build
 
   worker:
     runs-on: ubuntu-latest
