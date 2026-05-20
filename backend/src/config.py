@@ -194,6 +194,21 @@ def _load_settings() -> _DefaultSettings:
     cors = os.environ.get("CORS_ORIGINS")
     if cors:
         s.cors_origins = [o.strip() for o in cors.split(",") if o.strip()]
+
+    # R2 / S3 credential names — the Worker forwards the S3-standard names
+    # (``R2_ACCESS_KEY_ID`` / ``R2_SECRET_ACCESS_KEY``) but the legacy
+    # backend settings use ``R2_ACCESS_KEY`` / ``R2_SECRET_KEY``. Accept
+    # both so the container can authenticate against R2 regardless of
+    # which scheme the operator put in ``wrangler secret put``.
+    if not s.r2_access_key:
+        s.r2_access_key = os.environ.get("R2_ACCESS_KEY_ID", "") or s.r2_access_key
+    if not s.r2_secret_key:
+        s.r2_secret_key = os.environ.get("R2_SECRET_ACCESS_KEY", "") or s.r2_secret_key
+    # Synthesise the endpoint URL from the account id when only the account
+    # id was supplied (CF Containers don't ship the full URL by default).
+    if not s.r2_endpoint_url and s.r2_account_id:
+        s.r2_endpoint_url = f"https://{s.r2_account_id}.r2.cloudflarestorage.com"
+
     if not s.clerk_jwks_url and s.clerk_issuer:
         s.clerk_jwks_url = s.clerk_issuer.rstrip("/") + "/.well-known/jwks.json"
     return s
