@@ -66,6 +66,15 @@ class VectorStore(Protocol):
 
     def delete_namespace(self, namespace: str) -> None: ...
 
+    def list_namespace(self, namespace: str) -> list[VectorItem]:
+        """Enumerate every item in ``namespace``.
+
+        Used by the BM25 corpus builder, which needs lexical access to every
+        chunk a user has indexed. Vector fields may be returned empty since
+        BM25 only consumes ``content`` + ``metadata``.
+        """
+        ...
+
 
 # ── Chroma (local dev) ────────────────────────────────────────────────────────
 
@@ -130,6 +139,29 @@ class ChromaVectorStore:
     def delete_namespace(self, namespace: str) -> None:
         self._collection.delete(where={"namespace": {"$eq": namespace}})
 
+    def list_namespace(self, namespace: str) -> list[VectorItem]:
+        data = self._collection.get(
+            where={"namespace": {"$eq": namespace}},
+            include=["documents", "metadatas"],
+        )
+        ids = data.get("ids") or []
+        docs = data.get("documents") or []
+        metas = data.get("metadatas") or []
+        out: list[VectorItem] = []
+        for i, id_ in enumerate(ids):
+            meta = (metas[i] if i < len(metas) else None) or {}
+            content = docs[i] if i < len(docs) else ""
+            out.append(
+                VectorItem(
+                    id=id_,
+                    vector=[],
+                    content=content,
+                    metadata={k: v for k, v in meta.items() if k != "namespace"},
+                    namespace=namespace,
+                )
+            )
+        return out
+
 
 # ── Postgres + pgvector ───────────────────────────────────────────────────────
 
@@ -153,9 +185,13 @@ class PgVectorStore:
     def __init__(self, dsn: str, dim: int, table: str = "vectors"):
         from sqlalchemy import create_engine
 
-        # Use sync driver here (psycopg) — vector inserts are infrequent and
-        # search runs in a threadpool from FastAPI.
-        sync_dsn = dsn.replace("+asyncpg", "").replace("+psycopg", "")
+        # Use sync driver here (psycopg v3) — vector inserts are infrequent
+        # and search runs in a threadpool from FastAPI. Normalise async URLs
+        # (``+asyncpg``) to the sync psycopg dialect; keep an existing
+        # ``+psycopg`` intact so SQLAlchemy doesn't fall back to psycopg2.
+        sync_dsn = dsn.replace("+asyncpg", "+psycopg")
+        if sync_dsn.startswith("postgresql://"):
+            sync_dsn = sync_dsn.replace("postgresql://", "postgresql+psycopg://", 1)
         self._engine = create_engine(sync_dsn, future=True)
         self._dim = dim
         self._table = table
@@ -260,6 +296,23 @@ class PgVectorStore:
                 text(f"DELETE FROM {self._table} WHERE namespace = :ns"),
                 {"ns": namespace},
             )
+
+    def list_namespace(self, namespace: str) -> list[VectorItem]:
+        from sqlalchemy import text
+
+        sql = f"SELECT id, content, metadata FROM {self._table} WHERE namespace = :ns"
+        with self._engine.begin() as conn:
+            rows = conn.execute(text(sql), {"ns": namespace}).all()
+        return [
+            VectorItem(
+                id=r[0],
+                vector=[],
+                content=r[1],
+                metadata=r[2] or {},
+                namespace=namespace,
+            )
+            for r in rows
+        ]
 
 
 def _pg_vector_literal(vec: list[float]) -> str:
@@ -385,6 +438,12 @@ class CloudflareVectorize:
         )
         r.raise_for_status()
 
+    def list_namespace(self, namespace: str) -> list[VectorItem]:
+        raise NotImplementedError(
+            "vectorize: enumeration not supported; BM25 corpus requires "
+            "pgvector or chroma backends"
+        )
+
 
 # ── In-memory (tests) ─────────────────────────────────────────────────────────
 
@@ -425,6 +484,19 @@ class InMemoryVectorStore:
     def delete_namespace(self, namespace: str) -> None:
         for k in [k for k, v in self._items.items() if v.namespace == namespace]:
             del self._items[k]
+
+    def list_namespace(self, namespace: str) -> list[VectorItem]:
+        return [
+            VectorItem(
+                id=it.id,
+                vector=list(it.vector),
+                content=it.content,
+                metadata=dict(it.metadata),
+                namespace=it.namespace,
+            )
+            for it in self._items.values()
+            if it.namespace == namespace
+        ]
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
