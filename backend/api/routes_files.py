@@ -31,11 +31,28 @@ log = logging.getLogger(__name__)
 @router.post("/uploads/presign", response_model=PresignResponse)
 async def presign(
     body: PresignRequest,
+    request: Request,
     user: Annotated[User, Depends(current_user)],
     db: Annotated[AsyncSession, Depends(db_session)],
 ) -> PresignResponse:
+    # Two callers reach this endpoint:
+    #   (a) the Worker, which has already minted an R2 presigned PUT URL
+    #       (aws4fetch) and forwarded the original POST with the chosen
+    #       ``blob_key`` in the ``X-Presigned-Blob-Key`` header. We must
+    #       persist that key so ``/process`` HEADs the right object.
+    #   (b) local dev / direct calls without the Worker — we mint our own
+    #       URL via boto3 (or LocalBlobStore for filesystem dev).
+    worker_blob_key = request.headers.get("X-Presigned-Blob-Key")
     blob = make_blob_store()
-    url, key = blob.presign_put(user_id=user.id, name=body.name, mime=body.mime)
+    if worker_blob_key:
+        # Trust the Worker's key but never mint a usable URL here — the
+        # Worker has already returned its own URL to the browser. Return a
+        # placeholder so any caller relying on this URL fails loud rather
+        # than silently uploading to the wrong place.
+        url = "worker-presigned"
+        key = worker_blob_key
+    else:
+        url, key = blob.presign_put(user_id=user.id, name=body.name, mime=body.mime)
     row = FileRow(
         user_id=user.id,
         name=body.name,
@@ -81,6 +98,8 @@ async def process_upload(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[AsyncSession, Depends(db_session)],
 ) -> ProcessResponse:
+    import asyncio
+
     row = (
         await db.execute(select(FileRow).where(FileRow.id == file_id, FileRow.user_id == user.id))
     ).scalar_one_or_none()
@@ -88,7 +107,20 @@ async def process_upload(
         raise HTTPException(404, "file not found")
 
     blob = make_blob_store()
-    if not blob.exists(row.blob_key):
+    # R2 is strongly consistent for new-object reads, but we have observed
+    # tail-latency cases where HEAD returns 404 within ~100 ms of a fresh
+    # PUT (typically when the client polls /process immediately after the
+    # browser sees a 200 from R2 but before R2's metadata replication
+    # settles). Retry briefly before giving up — the cost of a few extra
+    # HEADs is trivial vs. forcing the user to re-upload.
+    blob_present = False
+    for attempt in range(4):
+        if blob.exists(row.blob_key):
+            blob_present = True
+            break
+        if attempt < 3:
+            await asyncio.sleep(0.25 * (attempt + 1))
+    if not blob_present:
         row.status = "failed"
         row.error = "blob missing — upload not completed"
         await db.commit()
