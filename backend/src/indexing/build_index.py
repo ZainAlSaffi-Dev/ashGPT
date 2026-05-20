@@ -19,12 +19,10 @@ import re
 import sys
 from pathlib import Path
 
-import chromadb
 import fitz  # pymupdf
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from langchain_chroma import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.config import (
@@ -37,6 +35,11 @@ from src.config import (
     VLM_MODEL,
 )
 from src.embeddings import ZeroEntropyEmbeddings
+
+# chromadb + langchain_chroma are only required by the build_index() entry
+# point (one-shot bulk indexer). Other modules (e.g. src/ingestion/extract.py)
+# import describe_slide from this file, so we keep the top-level free of
+# chroma imports — they live inside build_index() instead.
 
 load_dotenv()
 
@@ -207,6 +210,11 @@ def _ingest_slides(
 
 def build_index() -> None:
     """Run the full multimodal ingestion pipeline."""
+    # Imported lazily so that other modules can pull ``describe_slide`` from
+    # this file without dragging chromadb into the prod container.
+    import chromadb
+    from langchain_chroma import Chroma
+
     client = genai.Client()  # reads GOOGLE_API_KEY from env
 
     week_dirs = sorted(DATA_DIR.iterdir(), key=_week_sort_key)

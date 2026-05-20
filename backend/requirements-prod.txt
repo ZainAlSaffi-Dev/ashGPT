@@ -1,7 +1,6 @@
 # Slim production requirements for Cloudflare Containers.
-# Excludes: torch, sentence-transformers, streamlit*, matplotlib, pytest*.
-# Keeps chromadb because src/agent/tools.py still hard-imports it (TODO:
-# refactor to use storage/vector_store.py factory).
+# Excludes: torch, sentence-transformers, streamlit*, matplotlib, pytest*,
+# chromadb (prod uses pgvector via src/storage/vector_store.py).
 
 # Agent pipeline
 langchain>=0.3.0
@@ -10,10 +9,6 @@ langchain-openai>=0.3.0
 langgraph>=0.4.0
 google-genai>=1.70.0
 openai>=1.50.0
-
-# Chroma — still hard-imported by src/agent/tools.py
-chromadb>=1.0.0
-langchain-chroma>=0.2.0
 
 # Ingestion
 pymupdf>=1.25.0
