@@ -1,33 +1,74 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
-import { motion } from 'framer-motion';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import { ExternalLink, FileText, Image as ImageIcon, X } from 'lucide-react';
 
+import { highlightSnippet } from '@/lib/citation-highlight';
 import type { SourceHit } from '@/lib/types';
+import { cn } from '@/lib/utils';
 
-interface Anchor {
+export interface CitationAnchor {
   x: number;
   y: number;
   width: number;
+  height: number;
 }
 
 interface Props {
   source: SourceHit;
-  index: number; // 1-based S# for display
-  anchor: Anchor;
+  index: number;
+  /** ``hover`` = transient preview that closes on mouseleave. ``pinned`` =
+   *  click-to-pin, only closes on outside-click / Esc / X. */
+  mode: 'hover' | 'pinned';
+  anchor: CitationAnchor;
+  /** Adjacent prose captured by rehypeCitations so we can highlight the
+   *  overlapping span inside the cited chunk snippet. */
+  context: string;
   onClose: () => void;
   onOpenInPanel: () => void;
+  onPointerEnter?: () => void;
+  onPointerLeave?: () => void;
 }
 
 const POPOVER_WIDTH = 320;
+const POPOVER_H = 220;
 const GUTTER = 12;
+const MOBILE_BREAKPOINT = 640;
 
-export function CitationPopover({ source, index, anchor, onClose, onOpenInPanel }: Props) {
-  const ref = useRef<HTMLDivElement>(null);
-
-  // Close on outside click / Escape — same semantics as a small modal.
+function useViewport() {
+  const [size, setSize] = useState(() => ({
+    w: typeof window !== 'undefined' ? window.innerWidth : 1024,
+    h: typeof window !== 'undefined' ? window.innerHeight : 768,
+  }));
   useEffect(() => {
+    const onResize = () => setSize({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return size;
+}
+
+export function CitationPopover({
+  source,
+  index,
+  mode,
+  anchor,
+  context,
+  onClose,
+  onOpenInPanel,
+  onPointerEnter,
+  onPointerLeave,
+}: Props) {
+  const ref = useRef<HTMLDivElement>(null);
+  const { w: viewportW, h: viewportH } = useViewport();
+  const isMobile = viewportW < MOBILE_BREAKPOINT;
+  const isPinned = mode === 'pinned';
+
+  // Outside-click + Esc only matter for the pinned card. Hover previews
+  // are owned by the parent's pointer logic.
+  useEffect(() => {
+    if (!isPinned) return;
     const onDown = (e: MouseEvent) => {
       if (!ref.current) return;
       if (!ref.current.contains(e.target as Node)) onClose();
@@ -35,16 +76,13 @@ export function CitationPopover({ source, index, anchor, onClose, onOpenInPanel 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
     };
-    // ``mousedown`` over ``click`` so a fresh click on a different citation
-    // closes this popover before the new one opens (otherwise the parent's
-    // click handler can't distinguish "swap" from "close").
     window.addEventListener('mousedown', onDown);
     window.addEventListener('keydown', onKey);
     return () => {
       window.removeEventListener('mousedown', onDown);
       window.removeEventListener('keydown', onKey);
     };
-  }, [onClose]);
+  }, [isPinned, onClose]);
 
   const Icon =
     source.doc_type === 'lecture_slide' ||
@@ -53,49 +91,130 @@ export function CitationPopover({ source, index, anchor, onClose, onOpenInPanel 
       ? ImageIcon
       : FileText;
 
-  // Position: try to centre under the citation but keep the panel fully
-  // on-screen with a small gutter. ``position: fixed`` so the popover
-  // floats above the chat scroll container without getting clipped.
-  const viewportW = typeof window !== 'undefined' ? window.innerWidth : 1024;
-  const viewportH = typeof window !== 'undefined' ? window.innerHeight : 768;
-  let left = anchor.x + anchor.width / 2 - POPOVER_WIDTH / 2;
-  left = Math.max(GUTTER, Math.min(left, viewportW - POPOVER_WIDTH - GUTTER));
-  // Default below the citation. If that would overflow the viewport, flip
-  // above (popover height ~180px; treat as fixed budget).
-  const POPOVER_H = 220;
-  const wantsBelow = anchor.y + 6 + POPOVER_H < viewportH - GUTTER;
-  const top = wantsBelow ? anchor.y + 6 : Math.max(GUTTER, anchor.y - POPOVER_H - 6);
+  const highlight = useMemo(
+    () => highlightSnippet(source.snippet ?? '', context ?? ''),
+    [source.snippet, context],
+  );
+
+  const place = useMemo(() => {
+    let left = anchor.x + anchor.width / 2 - POPOVER_WIDTH / 2;
+    left = Math.max(GUTTER, Math.min(left, viewportW - POPOVER_WIDTH - GUTTER));
+    const below = anchor.y + anchor.height + 6;
+    const wantsBelow = below + POPOVER_H < viewportH - GUTTER;
+    const top = wantsBelow ? below : Math.max(GUTTER, anchor.y - POPOVER_H - 6);
+    return { left, top, wantsBelow };
+  }, [anchor, viewportW, viewportH]);
+
+  // Mobile pinned → bottom sheet. Touch hover is unreliable so we only
+  // render the sheet variant for pinned interaction.
+  if (isMobile && isPinned) {
+    return (
+      <AnimatePresence>
+        <motion.div
+          key="backdrop"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.15 }}
+          className="fixed inset-0 z-50 bg-ink/30"
+          onClick={onClose}
+          aria-hidden="true"
+        />
+        <motion.div
+          key="sheet"
+          ref={ref}
+          initial={{ y: '100%' }}
+          animate={{ y: 0 }}
+          exit={{ y: '100%' }}
+          transition={{ type: 'spring', stiffness: 360, damping: 36 }}
+          className="fixed inset-x-0 bottom-0 z-50 rounded-t-2xl border-t border-parchment-warm bg-parchment text-sm shadow-2xl"
+          role="dialog"
+          aria-label={`Source S${index}`}
+        >
+          <div className="mx-auto mt-2 h-1 w-10 rounded-full bg-parchment-warm" aria-hidden="true" />
+          <PopoverContent
+            source={source}
+            index={index}
+            Icon={Icon}
+            highlight={highlight}
+            onClose={onClose}
+            onOpenInPanel={onOpenInPanel}
+            variant="sheet"
+          />
+        </motion.div>
+      </AnimatePresence>
+    );
+  }
 
   return (
     <motion.div
       ref={ref}
-      initial={{ opacity: 0, y: wantsBelow ? -4 : 4, scale: 0.98 }}
+      initial={{ opacity: 0, y: place.wantsBelow ? -2 : 2, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, scale: 0.98 }}
+      exit={{ opacity: 0, y: place.wantsBelow ? -2 : 2, scale: 0.98 }}
       transition={{ duration: 0.12, ease: 'easeOut' }}
-      style={{ position: 'fixed', top, left, width: POPOVER_WIDTH, zIndex: 60 }}
+      style={{ position: 'fixed', top: place.top, left: place.left, width: POPOVER_WIDTH, zIndex: 60 }}
       className="rounded-xl border border-parchment-warm bg-parchment text-xs shadow-xl ring-1 ring-ink/5"
-      role="dialog"
+      role={isPinned ? 'dialog' : 'tooltip'}
       aria-label={`Source S${index}`}
+      onPointerEnter={onPointerEnter}
+      onPointerLeave={onPointerLeave}
     >
+      <PopoverContent
+        source={source}
+        index={index}
+        Icon={Icon}
+        highlight={highlight}
+        onClose={onClose}
+        onOpenInPanel={onOpenInPanel}
+        variant={isPinned ? 'pinned' : 'hover'}
+      />
+    </motion.div>
+  );
+}
+
+interface ContentProps {
+  source: SourceHit;
+  index: number;
+  Icon: typeof FileText;
+  highlight: ReturnType<typeof highlightSnippet>;
+  onClose: () => void;
+  onOpenInPanel: () => void;
+  variant: 'hover' | 'pinned' | 'sheet';
+}
+
+function PopoverContent({
+  source,
+  index,
+  Icon,
+  highlight,
+  onClose,
+  onOpenInPanel,
+  variant,
+}: ContentProps) {
+  const showClose = variant !== 'hover';
+  return (
+    <>
       <div className="flex items-center justify-between gap-2 border-b border-parchment-warm/70 px-3 py-2">
         <div className="flex min-w-0 items-center gap-2 text-ink">
-          <span className="inline-flex h-5 w-7 items-center justify-center rounded bg-accent text-[10px] font-bold text-parchment">
-            S{index}
+          <span className="inline-flex h-5 min-w-[1.4rem] items-center justify-center rounded-full bg-accent px-1.5 text-[10px] font-bold text-parchment">
+            {index}
           </span>
           <Icon className="h-3.5 w-3.5 shrink-0 text-accent" />
           <span className="truncate font-medium" title={source.source ?? ''}>
             {source.source ?? 'unknown'}
           </span>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close"
-          className="rounded p-1 text-ink-soft transition hover:bg-parchment-warm hover:text-ink"
-        >
-          <X className="h-3 w-3" />
-        </button>
+        {showClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="rounded p-1 text-ink-soft transition hover:bg-parchment-warm hover:text-ink"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        )}
       </div>
 
       <div className="px-3 py-2">
@@ -104,14 +223,29 @@ export function CitationPopover({ source, index, anchor, onClose, onOpenInPanel 
             {source.week}
           </div>
         )}
-        <p className="max-h-32 overflow-y-auto whitespace-pre-wrap rounded bg-accent/10 px-2 py-1.5 leading-relaxed text-ink ring-1 ring-accent/20">
-          {source.snippet || '(no snippet)'}
+        <p
+          className={cn(
+            'whitespace-pre-wrap rounded bg-accent/10 px-2 py-1.5 leading-relaxed text-ink ring-1 ring-accent/20',
+            variant === 'sheet' ? 'max-h-64 overflow-y-auto' : 'max-h-32 overflow-y-auto',
+          )}
+        >
+          {highlight ? (
+            <>
+              {highlight.before}
+              <mark className="rounded bg-accent/25 px-0.5 text-ink ring-1 ring-accent/40">
+                {highlight.match}
+              </mark>
+              {highlight.after}
+            </>
+          ) : (
+            source.snippet || '(no snippet)'
+          )}
         </p>
       </div>
 
       <div className="flex items-center justify-between border-t border-parchment-warm/70 px-3 py-2">
         <span className="text-[10px] text-ink-soft">
-          Cited chunk from your library
+          {variant === 'hover' ? 'Click to pin' : 'Cited chunk from your library'}
         </span>
         <button
           type="button"
@@ -122,6 +256,6 @@ export function CitationPopover({ source, index, anchor, onClose, onOpenInPanel 
           <ExternalLink className="h-3 w-3" />
         </button>
       </div>
-    </motion.div>
+    </>
   );
 }
