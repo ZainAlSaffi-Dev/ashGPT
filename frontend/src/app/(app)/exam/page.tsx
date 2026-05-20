@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useAuth } from '@clerk/nextjs';
 
 import { generateExam, submitExam } from '@/lib/api';
 import type { ExamPayload, ExamResult } from '@/lib/types';
@@ -9,6 +10,7 @@ import { cn } from '@/lib/utils';
 type Scope = 'all' | 'week' | 'past_paper';
 
 export default function ExamPage() {
+  const { getToken } = useAuth();
   const [scopeType, setScopeType] = useState<Scope>('all');
   const [scopeValue, setScopeValue] = useState('');
   const [numMcq, setNumMcq] = useState(5);
@@ -27,13 +29,14 @@ export default function ExamPage() {
     setResult(null);
     setAnswers({});
     try {
+      const token = (await getToken()) ?? undefined;
       const payload = await generateExam({
         scope_type: scopeType,
         scope_value: scopeValue || undefined,
         num_mcq: numMcq,
         num_short: numShort,
         difficulty,
-      });
+      }, token);
       setExam(payload);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -46,7 +49,8 @@ export default function ExamPage() {
     if (!exam) return;
     setBusy(true);
     try {
-      const r = await submitExam(exam.id, answers);
+      const token = (await getToken()) ?? undefined;
+      const r = await submitExam(exam.id, answers, token);
       setResult(r);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

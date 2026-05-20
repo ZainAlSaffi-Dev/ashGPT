@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Trash2 } from 'lucide-react';
+import { useAuth } from '@clerk/nextjs';
 
 import { Dropzone } from '@/components/Dropzone';
 import { deleteFile, listFiles } from '@/lib/api';
@@ -9,18 +10,20 @@ import type { FileMeta } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 export default function LibraryPage() {
+  const { getToken } = useAuth();
   const [files, setFiles] = useState<FileMeta[]>([]);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const list = await listFiles();
+      const token = (await getToken()) ?? undefined;
+      const list = await listFiles(token);
       setFiles(list);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [getToken]);
 
   useEffect(() => {
     void refresh();
@@ -28,7 +31,8 @@ export default function LibraryPage() {
 
   const onDelete = async (id: string) => {
     if (!confirm('Delete this file and all its chunks? This cannot be undone.')) return;
-    await deleteFile(id);
+    const token = (await getToken()) ?? undefined;
+    await deleteFile(id, token);
     await refresh();
   };
 

@@ -3,6 +3,7 @@
 import { useCallback, useState } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { CloudUpload, Loader2 } from 'lucide-react';
+import { useAuth } from '@clerk/nextjs';
 
 import { presignUpload, processUpload, uploadBlob } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -27,6 +28,7 @@ const ACCEPT = {
 };
 
 export function Dropzone({ onComplete }: Props) {
+  const { getToken } = useAuth();
   const [uploads, setUploads] = useState<UploadStatus[]>([]);
 
   const onDrop = useCallback(
@@ -37,15 +39,16 @@ export function Dropzone({ onComplete }: Props) {
           { name: file.name, state: 'uploading' },
         ]);
         try {
+          const token = (await getToken()) ?? undefined;
           const presign = await presignUpload({
             name: file.name,
             mime: file.type || 'application/octet-stream',
-          });
-          await uploadBlob(presign, file);
+          }, token);
+          await uploadBlob(presign, file, token);
           setUploads((u) =>
             u.map((x) => (x.name === file.name ? { ...x, state: 'processing' } : x)),
           );
-          const res = await processUpload(presign.file_id);
+          const res = await processUpload(presign.file_id, token);
           setUploads((u) =>
             u.map((x) =>
               x.name === file.name
@@ -72,7 +75,7 @@ export function Dropzone({ onComplete }: Props) {
       }
       onComplete?.();
     },
-    [onComplete],
+    [onComplete, getToken],
   );
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
