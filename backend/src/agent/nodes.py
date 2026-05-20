@@ -9,9 +9,11 @@ Node pipeline:
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
+import time
 
 from dotenv import load_dotenv
 
@@ -42,6 +44,36 @@ def _append_trace(state: AgentState, node_name: str) -> list[str]:
     trace = list(state.get("node_trace", []))
     trace.append(node_name)
     return trace
+
+
+def _timed(name: str):
+    """Decorate a node function to record its wall-clock duration into ``state.timings``.
+
+    The wrapped node may opt into sub-hop timings by including ``_timing_sub``
+    in its returned delta (e.g. retrieval reporting embed/chroma/bm25/rerank
+    milliseconds). The decorator pops that key off the delta and stores it
+    under the per-node entry so the public state schema stays clean.
+    """
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(state: AgentState) -> dict:
+            t0 = time.perf_counter()
+            delta = fn(state) or {}
+            ms = round((time.perf_counter() - t0) * 1000, 1)
+            timings = list(state.get("timings", []))
+            entry: dict = {"node": name, "ms": ms}
+            sub = delta.pop("_timing_sub", None) if isinstance(delta, dict) else None
+            if sub:
+                entry["sub"] = sub
+            timings.append(entry)
+            if isinstance(delta, dict):
+                delta["timings"] = timings
+            return delta
+
+        return wrapper
+
+    return deco
 
 
 # ── Helper: format retrieved docs for prompts ─────────────────────────────────
@@ -109,6 +141,7 @@ ROUTER_SYSTEM = (
 )
 
 
+@_timed("router")
 def router_node(state: AgentState) -> dict:
     """Classify the user's intent and extract any week filter.
 
@@ -160,6 +193,7 @@ def router_node(state: AgentState) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+@_timed("retrieval")
 def retrieval_node(state: AgentState) -> dict:
     """Query ChromaDB for relevant text chunks and slide descriptions.
 
@@ -180,6 +214,7 @@ def retrieval_node(state: AgentState) -> dict:
         use_reranker_override,
     )
 
+    sub_timings: dict[str, float] = {}
     texts, slides = retrieve_all(
         search_q,
         week=week,
@@ -187,17 +222,20 @@ def retrieval_node(state: AgentState) -> dict:
         k_slides=4,
         use_reranker=use_reranker_override,
         namespace=namespace,
+        timings=sub_timings,
     )
 
     log.info(
-        "RetrievalNode: retrieved %d text chunks, %d slides",
+        "RetrievalNode: retrieved %d text chunks, %d slides (timings_ms=%s)",
         len(texts),
         len(slides),
+        sub_timings,
     )
     return {
         "retrieved_texts": texts,
         "retrieved_slides": slides,
         "node_trace": _append_trace(state, "retrieval"),
+        "_timing_sub": sub_timings or None,
     }
 
 
@@ -228,6 +266,7 @@ RATIO_SYSTEM = (
 )
 
 
+@_timed("ratio_extractor")
 def ratio_extractor_node(state: AgentState) -> dict:
     """Extract the ratio decidendi and produce an IRAC analysis.
 
@@ -315,6 +354,7 @@ CHRONOLOGY_SYSTEM = (
 )
 
 
+@_timed("chronology")
 def chronology_node(state: AgentState) -> dict:
     """Generate a Mermaid.js chronological flowchart from retrieved facts.
 
@@ -407,6 +447,7 @@ SYNTHESIS_SYSTEM = (
 )
 
 
+@_timed("synthesis")
 def synthesis_node(state: AgentState) -> dict:
     """Compile all upstream outputs into a final answer for the student.
 
@@ -513,6 +554,7 @@ def _collect_sources_text(state: AgentState) -> str:
     return "\n".join(p for p in parts if p)
 
 
+@_timed("verification")
 def verification_node(state: AgentState) -> dict:
     """Fact-check cited cases in the final answer against retrieved sources.
 
@@ -645,6 +687,7 @@ MEGA_PROMPT_SYSTEM = (
 )
 
 
+@_timed("mega_prompt")
 def mega_prompt_node(state: AgentState) -> dict:
     """Single-LLM ablation: retrieval context → one call produces IRAC + Mermaid + summary.
 
