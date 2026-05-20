@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { motion } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
@@ -7,6 +8,7 @@ import remarkGfm from 'remark-gfm';
 
 import { MermaidRenderer } from './MermaidRenderer';
 import { SourcePanel } from './SourcePanel';
+import { rehypeCitations } from '@/lib/rehype-citations';
 import type { ChatTurn } from '@/lib/useChat';
 import { cn, extractMermaid, withoutMermaid } from '@/lib/utils';
 
@@ -19,6 +21,9 @@ export function ChatMessage({ turn }: Props) {
   // Prefer the discrete `mermaid` field; fall back to inline-fence parsing.
   const mermaid = turn.mermaid || extractMermaid(turn.content);
   const bodyMd = turn.mermaid ? turn.content : withoutMermaid(turn.content);
+  // Track the citation the user most recently clicked so SourcePanel opens
+  // and highlights the matching row.
+  const [highlightedSource, setHighlightedSource] = useState<number | null>(null);
 
   return (
     <motion.div
@@ -37,7 +42,47 @@ export function ChatMessage({ turn }: Props) {
       <div className="prose prose-sm max-w-none">
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
-          rehypePlugins={[rehypeHighlight]}
+          rehypePlugins={[rehypeHighlight, rehypeCitations]}
+          components={{
+            // ``cite`` is emitted by rehypeCitations for ``[S#]`` tokens —
+            // render as a small clickable badge that highlights the matching
+            // entry in the SourcePanel below.
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            cite: ({ node, ...props }: any) => {
+              const idx = Number(node?.properties?.['data-source-index'] ?? 0);
+              return (
+                <button
+                  type="button"
+                  data-source-index={idx}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setHighlightedSource(idx - 1);
+                    document
+                      .getElementById(`source-${idx}`)
+                      ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                  }}
+                  className="not-italic mx-0.5 inline-flex items-center rounded bg-accent/15 px-1.5 py-0.5 align-baseline text-[0.7em] font-semibold text-accent transition hover:bg-accent hover:text-parchment"
+                  title={`Open source S${idx}`}
+                >
+                  {props.children}
+                </button>
+              );
+            },
+            // ``mark`` is emitted for ``[external]`` tokens — show as a
+            // visible warning chip so the student knows the next claim is
+            // not in their library.
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            mark: ({ node, ...props }: any) => {
+              if (node?.properties?.['data-external'] !== 'true') {
+                return <mark {...props} />;
+              }
+              return (
+                <span className="mr-1 inline-flex items-center rounded bg-red-100 px-1.5 py-0.5 text-[0.7em] font-semibold uppercase tracking-wide text-red-700 ring-1 ring-red-200">
+                  outside sources
+                </span>
+              );
+            },
+          }}
         >
           {bodyMd || ' '}
         </ReactMarkdown>
@@ -57,12 +102,22 @@ export function ChatMessage({ turn }: Props) {
           <pre className="whitespace-pre-wrap px-3 py-2 text-ink-muted">{turn.irac}</pre>
         </details>
       )}
-      {turn.sources && <SourcePanel sources={turn.sources} />}
+      {turn.sources && (
+        <SourcePanel sources={turn.sources} highlightedIndex={highlightedSource} />
+      )}
       {turn.verification && turn.verification.all_supported === false && (
         <p className="mt-2 text-xs text-accent">
           ⚠ Some citations could not be verified in retrieved sources.
         </p>
       )}
+      {turn.verification &&
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (turn.verification as any).used_external_knowledge && (
+          <p className="mt-2 text-xs text-red-700">
+            ⚠ This answer leaned on knowledge outside your indexed library.
+            Treat the marked claims as background, not authoritative.
+          </p>
+        )}
       {turn.historyOverflow &&
         (turn.historyOverflow.dropped_turns > 0 ||
           turn.historyOverflow.truncated_messages > 0) && (

@@ -80,7 +80,15 @@ def _timed(name: str):
 
 
 def _format_context(state: AgentState) -> str:
-    """Compile retrieved text and image-bearing chunks into a single context block."""
+    """Compile retrieved chunks into a context block with stable citation labels.
+
+    Each source gets a sequential ``[S#]`` label that the synthesis prompt
+    instructs the model to cite inline. The UI parses the same tokens out of
+    the final answer and renders them as clickable badges linking to the
+    matching ``sources`` entry. Text and image-bearing chunks share one
+    numbering sequence so a citation always resolves to exactly one source
+    regardless of modality.
+    """
     sections: list[str] = []
 
     def _tags(doc: dict) -> str:
@@ -91,22 +99,23 @@ def _format_context(state: AgentState) -> str:
             bits.append(doc["week"])
         return f" [{', '.join(bits)}]" if bits else ""
 
+    label = 0
     texts = state.get("retrieved_texts", [])
     if texts:
         sections.append("=== RETRIEVED TEXT SOURCES ===")
-        for i, doc in enumerate(texts, 1):
+        for doc in texts:
+            label += 1
             sections.append(
-                f"\n--- Source {i}: {doc['source']}{_tags(doc)} ---\n"
-                f"{doc['content']}"
+                f"\n[S{label}] {doc['source']}{_tags(doc)}\n{doc['content']}"
             )
 
     slides = state.get("retrieved_slides", [])
     if slides:
         sections.append("\n=== RETRIEVED IMAGES / DIAGRAMS ===")
-        for i, doc in enumerate(slides, 1):
+        for doc in slides:
+            label += 1
             sections.append(
-                f"\n--- Image {i}: {doc['source']}{_tags(doc)} ---\n"
-                f"{doc['content']}"
+                f"\n[S{label}] {doc['source']}{_tags(doc)}\n{doc['content']}"
             )
 
     return "\n".join(sections) if sections else "(No context retrieved.)"
@@ -351,21 +360,24 @@ RATIO_SYSTEM = (
     "applied to reach its decision. Stay neutral on jurisdiction: follow "
     "whatever the sources indicate (Australian, English, US, EU, comparative, "
     "etc.).\n\n"
+    "Sources arrive labelled ``[S1]``, ``[S2]``, …. Use those exact tokens "
+    "for inline citations.\n\n"
     "You MUST structure your response as an IRAC analysis:\n"
     "1. **Issue**: State the legal question the court had to decide.\n"
     "2. **Rule**: State the legal rule or principle (this IS the ratio decidendi).\n"
     "3. **Application**: Explain how the court applied the rule to the facts.\n"
     "4. **Conclusion**: State the court's decision.\n\n"
-    "GROUNDING RULES:\n"
-    "- FACTS must come from the sources: case names, dates, statutory references, "
-    "holdings, and specific legal tests MUST appear in the source material. "
-    "Do NOT invent cases, statutes, or factual claims.\n"
-    "- EXPLANATIONS are encouraged: you may paraphrase, simplify, and explain "
-    "legal concepts in plain English to help the student understand. This is "
-    "your role as a tutor.\n"
-    "- If you cite a case or statute by name, it MUST appear in the sources.\n"
-    "- If the source material is insufficient, say so explicitly rather than "
-    "filling gaps from your own knowledge."
+    "GROUNDING RULES — non-negotiable:\n"
+    "- Every factual claim (case name, date, statute, holding, legal test) "
+    "MUST end with one or more ``[S#]`` tokens lifted verbatim from the "
+    "source labels.\n"
+    "- If a claim is not in any source, either drop it or mark the sentence "
+    "with a literal ``[external]`` prefix and explain why you needed outside "
+    "knowledge. Never silently smuggle facts in from your own training.\n"
+    "- Explanations and paraphrasing that don't introduce new facts don't "
+    "need a citation.\n"
+    "- If the source material is insufficient, say so explicitly with an "
+    "``[external]`` marker rather than filling gaps."
 )
 
 
@@ -521,25 +533,34 @@ SYNTHESIS_SYSTEM = (
     "uploaded corpus — cases, statutes, notes, slides, transcripts).\n\n"
     "You will be given:\n"
     "- The student's original question.\n"
-    "- Retrieved source material from their corpus (any document type).\n"
+    "- Retrieved source material from their corpus, each chunk labelled with "
+    "a stable identifier of the form ``[S1]``, ``[S2]``, …. These labels are "
+    "the only citation tokens the UI understands.\n"
     "- Optionally, an IRAC analysis with the ratio decidendi.\n"
     "- Optionally, a Mermaid.js chronological flowchart and timeline summary.\n\n"
-    "GROUNDING RULES:\n"
-    "- FACTS must come from the sources: all case names, dates, statutory "
-    "references, legal tests, and holdings you mention MUST appear in the "
-    "provided source material or upstream IRAC/chronology analysis. Do NOT "
-    "invent or import cases, statutes, or facts from your own knowledge.\n"
-    "- EXPLANATIONS are encouraged: paraphrase, simplify, and connect ideas "
-    "in plain English to help the student understand. You are a tutor, not "
-    "a copy machine.\n"
-    "- Use inline citations where you rely on specific sources, formatted as "
-    "(Source: <filename or short reference from the chunk header>).\n"
-    "- If the sources are insufficient, say: \"The provided sources do not "
-    "cover [topic] in detail. Please upload or consult further material.\"\n"
-    "- If CONVERSATION HISTORY is provided, continue the same study session: resolve "
-    "pronouns and short follow-ups using the transcript, but every **new** factual "
-    "claim about cases or law must still appear in the PRIMARY EVIDENCE (or "
-    "verified derived analysis).\n\n"
+    "GROUNDING RULES — non-negotiable:\n"
+    "1. Every factual claim (case name, date, statute, holding, legal test, "
+    "definition, doctrine attribution) MUST be followed by one or more "
+    "citation tokens, e.g. ``…the doctrine of estoppel [S1]`` or "
+    "``…s 31 of the Property Law Act [S2][S4]``. Use the ``[S#]`` tokens "
+    "EXACTLY as they appear in the source labels — do not invent S-numbers, "
+    "do not rephrase them as ``(Source: …)`` or footnotes.\n"
+    "2. If a claim is not covered by any provided source you MUST do ONE of "
+    "the following — never silently rely on outside knowledge:\n"
+    "    (a) Drop the claim entirely; or\n"
+    "    (b) Mark it explicitly: prefix the sentence with ``[external]`` "
+    "(literal brackets, lowercase) and add a short reason, e.g. ``[external] "
+    "Background context not in the supplied sources: …``. The UI surfaces "
+    "this to the student as a warning.\n"
+    "3. EXPLANATIONS, paraphrasing, plain-English restatements, and "
+    "definitional setup that do NOT introduce new facts do not need a "
+    "citation — only factual claims do.\n"
+    "4. If the sources are insufficient to answer the question, say so "
+    "explicitly with an ``[external]`` marker and suggest the student upload "
+    "more material — do not paper over the gap with general knowledge.\n"
+    "5. If CONVERSATION HISTORY is provided, resolve pronouns and follow-up "
+    "references using it, but every **new** factual claim must still be "
+    "either backed by a ``[S#]`` token or marked ``[external]``.\n\n"
     "CRITICAL — MERMAID DIAGRAM PRESERVATION RULE:\n"
     "If the DERIVED ANALYSIS section contains a ```mermaid code block, you MUST "
     "copy that exact ```mermaid ... ``` block verbatim into your final answer. "
@@ -685,6 +706,12 @@ def verification_node(state: AgentState) -> dict:
     supported = max(0, total - len(unsupported))
     confidence = supported / total
 
+    # Count ``[S#]`` citation tokens + ``[external]`` declarations so the UI
+    # can show the user how grounded the answer was and whether the model
+    # had to reach outside the indexed sources for anything.
+    citation_tokens = re.findall(r"\[S\d+\]", answer)
+    external_markers = re.findall(r"\[external\]", answer, flags=re.IGNORECASE)
+
     report = {
         "unsupported_claims": unsupported,
         "rewrites_applied": False,
@@ -692,6 +719,10 @@ def verification_node(state: AgentState) -> dict:
         "claims_supported": supported,
         "confidence_score": round(confidence, 3),
         "all_supported": len(unsupported) == 0,
+        "citation_count": len(citation_tokens),
+        "distinct_citations": sorted(set(citation_tokens)),
+        "used_external_knowledge": bool(external_markers),
+        "external_marker_count": len(external_markers),
     }
 
     if not unsupported:
