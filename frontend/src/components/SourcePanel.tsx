@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ChevronDown, FileText, Image as ImageIcon } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -15,6 +15,12 @@ interface Props {
 
 export function SourcePanel({ sources, highlightedIndex = null }: Props) {
   const [open, setOpen] = useState<boolean>(highlightedIndex !== null);
+  // Auto-open when the parent highlights a row (e.g. user clicked "View in
+  // sources" or pinned a citation chip). Don't auto-close — let the user
+  // collapse the panel manually.
+  useEffect(() => {
+    if (highlightedIndex !== null) setOpen(true);
+  }, [highlightedIndex]);
   if (!sources?.length) return null;
 
   return (
@@ -61,13 +67,13 @@ export function SourcePanel({ sources, highlightedIndex = null }: Props) {
                   <div className="flex items-center gap-2 text-ink">
                     <span
                       className={cn(
-                        'inline-flex h-5 w-7 items-center justify-center rounded text-[10px] font-bold',
+                        'inline-flex h-5 min-w-[1.4rem] items-center justify-center rounded-full px-1.5 text-[10px] font-bold transition',
                         isHit
-                          ? 'bg-accent text-parchment'
+                          ? 'bg-accent text-parchment ring-2 ring-accent/40'
                           : 'bg-parchment text-ink-muted ring-1 ring-parchment-warm',
                       )}
                     >
-                      S{i + 1}
+                      {i + 1}
                     </span>
                     <Icon className="h-3.5 w-3.5 text-accent" />
                     <span className="truncate font-medium" title={s.source ?? ''}>

@@ -1,12 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
 
-import { CitationPopover } from './CitationPopover';
+import { CitationBadge } from './CitationBadge';
+import { CitationPopover, type CitationAnchor } from './CitationPopover';
 import { MermaidRenderer } from './MermaidRenderer';
 import { SourcePanel } from './SourcePanel';
 import { rehypeCitations } from '@/lib/rehype-citations';
@@ -17,21 +18,77 @@ interface Props {
   turn: ChatTurn;
 }
 
+interface CitationTarget {
+  occurrence: string;
+  idx: number;
+  anchor: CitationAnchor;
+  context: string;
+}
+
+const HOVER_OPEN_DELAY = 250;
+const HOVER_CLOSE_DELAY = 120;
+
 export function ChatMessage({ turn }: Props) {
   const isUser = turn.role === 'user';
   // Prefer the discrete `mermaid` field; fall back to inline-fence parsing.
   const mermaid = turn.mermaid || extractMermaid(turn.content);
   const bodyMd = turn.mermaid ? turn.content : withoutMermaid(turn.content);
-  // Track the citation the user most recently clicked so SourcePanel opens
-  // and highlights the matching row.
+
   const [highlightedSource, setHighlightedSource] = useState<number | null>(null);
-  // Floating popover anchored on the citation button. ``idx`` is 1-based
-  // (S1, S2, …) so it can drive both the SourcePanel highlight (idx-1) and
-  // the popover header label directly.
-  const [popover, setPopover] = useState<{
-    idx: number;
-    anchor: { x: number; y: number; width: number };
-  } | null>(null);
+  const [pinned, setPinned] = useState<CitationTarget | null>(null);
+  const [hover, setHover] = useState<CitationTarget | null>(null);
+
+  // Open delay stops accidental cursor sweeps; close delay lets the cursor
+  // travel from chip onto the card without dismissing it.
+  const openTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearTimers = useCallback(() => {
+    if (openTimer.current) clearTimeout(openTimer.current);
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    openTimer.current = null;
+    closeTimer.current = null;
+  }, []);
+  useEffect(() => clearTimers, [clearTimers]);
+
+  const anchorFromEl = (el: HTMLElement): CitationAnchor => {
+    const r = el.getBoundingClientRect();
+    return { x: r.left, y: r.top, width: r.width, height: r.height };
+  };
+
+  const scheduleHoverOpen = useCallback((target: CitationTarget) => {
+    if (closeTimer.current) {
+      clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+    if (openTimer.current) clearTimeout(openTimer.current);
+    openTimer.current = setTimeout(() => {
+      setHover((cur) => (cur?.occurrence === target.occurrence ? cur : target));
+    }, HOVER_OPEN_DELAY);
+  }, []);
+
+  const scheduleHoverClose = useCallback(() => {
+    if (openTimer.current) {
+      clearTimeout(openTimer.current);
+      openTimer.current = null;
+    }
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    closeTimer.current = setTimeout(() => {
+      setHover(null);
+    }, HOVER_CLOSE_DELAY);
+  }, []);
+
+  const togglePin = useCallback(
+    (target: CitationTarget) => {
+      clearTimers();
+      setHover(null);
+      setHighlightedSource(target.idx - 1);
+      setPinned((cur) => (cur?.occurrence === target.occurrence ? null : target));
+    },
+    [clearTimers],
+  );
+
+  const showPinned = pinned;
+  const showHover = !pinned && hover;
 
   return (
     <motion.div
@@ -40,8 +97,6 @@ export function ChatMessage({ turn }: Props) {
       transition={{ duration: 0.18, ease: 'easeOut' }}
       className={cn(
         'rounded-2xl px-4 py-3',
-        // Assistant bubbles stretch wider for readable prose; user bubbles
-        // stay narrow so the eye can follow the back-and-forth.
         isUser
           ? 'ml-auto max-w-[80%] bg-accent text-parchment shadow-sm'
           : 'mr-auto w-full bg-parchment text-ink ring-1 ring-parchment-warm',
@@ -52,51 +107,63 @@ export function ChatMessage({ turn }: Props) {
           remarkPlugins={[remarkGfm]}
           rehypePlugins={[rehypeHighlight, rehypeCitations]}
           components={{
-            // ``cite`` is emitted by rehypeCitations for ``[S#]`` tokens —
-            // render as a small clickable badge that highlights the matching
-            // entry in the SourcePanel below.
+            // ``cite`` is emitted by rehypeCitations for ``[S#]`` tokens.
+            // Each chip carries a stable per-render occurrence id so
+            // duplicate [S1]s remain individually addressable.
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            cite: ({ node, ...props }: any) => {
+            cite: ({ node }: any) => {
               const idx = Number(node?.properties?.['data-source-index'] ?? 0);
+              const occurrence: string =
+                node?.properties?.['data-cite-occurrence'] ?? `${idx}-0`;
+              const context: string = node?.properties?.['data-cite-context'] ?? '';
+              const isPinnedChip = pinned?.occurrence === occurrence;
+              const isHoveredChip = !isPinnedChip && hover?.occurrence === occurrence;
               return (
-                <button
-                  type="button"
-                  data-source-index={idx}
+                <CitationBadge
+                  index={idx}
+                  occurrenceId={occurrence}
+                  active={isPinnedChip}
+                  hovered={isHoveredChip}
                   onClick={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    setHighlightedSource(idx - 1);
-                    // Click a second time on the same chip → close. Click
-                    // a different chip → swap to that one.
-                    if (popover && popover.idx === idx) {
-                      setPopover(null);
-                      return;
-                    }
-                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                    setPopover({
+                    togglePin({
+                      occurrence,
                       idx,
-                      anchor: {
-                        x: rect.left,
-                        y: rect.bottom,
-                        width: rect.width,
-                      },
+                      anchor: anchorFromEl(e.currentTarget as HTMLElement),
+                      context,
                     });
                   }}
-                  className={cn(
-                    'not-italic mx-0.5 inline-flex items-center rounded px-1.5 py-0.5 align-baseline text-[0.7em] font-semibold transition',
-                    popover?.idx === idx
-                      ? 'bg-accent text-parchment'
-                      : 'bg-accent/15 text-accent hover:bg-accent hover:text-parchment',
-                  )}
-                  title={`Show source S${idx}`}
-                >
-                  {props.children}
-                </button>
+                  onPointerEnter={(e) => {
+                    if (pinned) return;
+                    scheduleHoverOpen({
+                      occurrence,
+                      idx,
+                      anchor: anchorFromEl(e.currentTarget as HTMLElement),
+                      context,
+                    });
+                  }}
+                  onPointerLeave={() => {
+                    if (pinned) return;
+                    scheduleHoverClose();
+                  }}
+                  onFocus={(e) => {
+                    if (pinned) return;
+                    scheduleHoverOpen({
+                      occurrence,
+                      idx,
+                      anchor: anchorFromEl(e.currentTarget as HTMLElement),
+                      context,
+                    });
+                  }}
+                  onBlur={() => {
+                    if (pinned) return;
+                    scheduleHoverClose();
+                  }}
+                />
               );
             },
-            // ``mark`` is emitted for ``[external]`` tokens — show as a
-            // visible warning chip so the student knows the next claim is
-            // not in their library.
+            // ``mark`` is emitted for ``[external]`` tokens.
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             mark: ({ node, ...props }: any) => {
               if (node?.properties?.['data-external'] !== 'true') {
@@ -164,20 +231,47 @@ export function ChatMessage({ turn }: Props) {
         </p>
       )}
       <AnimatePresence>
-        {popover && turn.sources && turn.sources[popover.idx - 1] && (
+        {showPinned && turn.sources && turn.sources[showPinned.idx - 1] && (
           <CitationPopover
-            key={popover.idx}
-            index={popover.idx}
-            source={turn.sources[popover.idx - 1]}
-            anchor={popover.anchor}
-            onClose={() => setPopover(null)}
+            key={`pin-${showPinned.occurrence}`}
+            mode="pinned"
+            index={showPinned.idx}
+            source={turn.sources[showPinned.idx - 1]}
+            anchor={showPinned.anchor}
+            context={showPinned.context}
+            onClose={() => setPinned(null)}
             onOpenInPanel={() => {
-              setHighlightedSource(popover.idx - 1);
+              setHighlightedSource(showPinned.idx - 1);
               document
-                .getElementById(`source-${popover.idx}`)
+                .getElementById(`source-${showPinned.idx}`)
                 ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-              setPopover(null);
+              setPinned(null);
             }}
+          />
+        )}
+        {showHover && turn.sources && turn.sources[showHover.idx - 1] && (
+          <CitationPopover
+            key={`hov-${showHover.occurrence}`}
+            mode="hover"
+            index={showHover.idx}
+            source={turn.sources[showHover.idx - 1]}
+            anchor={showHover.anchor}
+            context={showHover.context}
+            onClose={() => setHover(null)}
+            onOpenInPanel={() => {
+              setHighlightedSource(showHover.idx - 1);
+              document
+                .getElementById(`source-${showHover.idx}`)
+                ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+              setHover(null);
+            }}
+            onPointerEnter={() => {
+              if (closeTimer.current) {
+                clearTimeout(closeTimer.current);
+                closeTimer.current = null;
+              }
+            }}
+            onPointerLeave={scheduleHoverClose}
           />
         )}
       </AnimatePresence>
