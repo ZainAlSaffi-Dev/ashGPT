@@ -6,6 +6,7 @@ import { BookMarked } from 'lucide-react';
 // Landing page calls ``auth()``, which needs a live request — opt out of
 // static prerender so the build does not require Clerk secrets.
 export const dynamic = 'force-dynamic';
+export const runtime = 'edge';
 
 export default async function LandingPage() {
   // ``auth()`` throws without Clerk env vars; we treat that as signed-out so

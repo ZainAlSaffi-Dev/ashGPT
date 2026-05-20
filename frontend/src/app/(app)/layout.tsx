@@ -7,6 +7,7 @@ import { Sidebar } from '@/components/Sidebar';
 // at build time. ``force-dynamic`` opts the whole ``(app)`` group out of
 // SSG/ISR and into per-request rendering.
 export const dynamic = 'force-dynamic';
+export const runtime = 'edge';
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (

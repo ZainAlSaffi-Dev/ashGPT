@@ -1,0 +1,9 @@
+# Cloudflare Pages config for the LawGPT frontend.
+# Picked up automatically by `wrangler pages deploy` when run from this dir.
+# next-on-pages output ships to .vercel/output/static and runs on Pages
+# Functions, which require nodejs_compat.
+
+name = "lawgpt"
+pages_build_output_dir = ".vercel/output/static"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]

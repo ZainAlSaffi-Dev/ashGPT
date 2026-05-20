@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useState } from 'react';
+import { useAuth } from '@clerk/nextjs';
 
 import { streamChat } from './streaming';
 import type { Intent, SourceHit, VerificationReport } from './types';
@@ -19,6 +20,7 @@ export interface ChatTurn {
 }
 
 export function useChat() {
+  const { getToken } = useAuth();
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [nodeTrace, setNodeTrace] = useState<string[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -44,6 +46,7 @@ export function useChat() {
         setTurns((t) => t.map((x) => (x.id === assistantId ? { ...x, ...patch } : x)));
 
       try {
+        const token = (await getToken()) ?? undefined;
         await streamChat(
           { query, session_id: sessionId, week_filter: opts?.week_filter ?? null },
           {
@@ -72,6 +75,7 @@ export function useChat() {
               updateAssistant({ streaming: false, content: `_error: ${detail}_` });
             },
           },
+          { token },
         );
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -81,7 +85,7 @@ export function useChat() {
         setBusy(false);
       }
     },
-    [busy, sessionId],
+    [busy, sessionId, getToken],
   );
 
   const reset = useCallback(() => {
