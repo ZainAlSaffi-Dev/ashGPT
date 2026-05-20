@@ -9,11 +9,16 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
-  return (
-    <ClerkProvider>
-      <html lang="en">
-        <body className="min-h-screen">{children}</body>
-      </html>
-    </ClerkProvider>
+  const clerkKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+  const tree = (
+    <html lang="en">
+      <body className="min-h-screen">{children}</body>
+    </html>
   );
+  // ClerkProvider throws at build time when the publishable key is missing.
+  // CI / fresh CF Pages preview builds run without secrets; we skip the
+  // provider in that case so the build can complete. Production sets
+  // NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY via Pages env vars.
+  if (!clerkKey) return tree;
+  return <ClerkProvider publishableKey={clerkKey}>{tree}</ClerkProvider>;
 }

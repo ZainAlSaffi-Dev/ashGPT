@@ -231,6 +231,11 @@ frontend/out/
 frontend/.turbo/
 *.tsbuildinfo
 
+# Un-ignore frontend/src/lib/ — the generic ``lib/`` rule (Python distribution
+# convention) was swallowing it and stripping the frontend on clean checkouts.
+!frontend/src/lib/
+!frontend/src/lib/**
+
 # Cloudflare Wrangler
 .wrangler/
 .dev.vars

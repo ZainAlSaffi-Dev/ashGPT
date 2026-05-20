@@ -3,8 +3,20 @@ import { redirect } from 'next/navigation';
 import { auth } from '@clerk/nextjs/server';
 import { BookMarked } from 'lucide-react';
 
+// Landing page calls ``auth()``, which needs a live request — opt out of
+// static prerender so the build does not require Clerk secrets.
+export const dynamic = 'force-dynamic';
+
 export default async function LandingPage() {
-  const { userId } = await auth();
+  // ``auth()`` throws without Clerk env vars; we treat that as signed-out so
+  // the page still renders during CI / no-secret builds.
+  let userId: string | null = null;
+  try {
+    const result = await auth();
+    userId = result.userId ?? null;
+  } catch {
+    userId = null;
+  }
   if (userId) redirect('/chat');
 
   return (
