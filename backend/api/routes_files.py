@@ -124,6 +124,23 @@ async def process_upload(
         row.status = "failed"
         row.error = "blob missing — upload not completed"
         await db.commit()
+        # Log enough state to triage: if creds were missing make_blob_store()
+        # above would have thrown, so reaching here with `not blob_present`
+        # means R2 was contactable but either the key wasn't propagated yet
+        # or auth was rejected. blob.exists() already logged the precise
+        # HEAD response code; this adds the surrounding context.
+        cfg = get_settings()
+        log.warning(
+            "blob missing after retries: file_id=%s blob_key=%s backend=%s "
+            "bucket=%s account_id_set=%s access_key_set=%s endpoint=%s",
+            file_id,
+            row.blob_key,
+            cfg.blob_backend,
+            cfg.r2_bucket,
+            bool(cfg.r2_account_id),
+            bool(cfg.r2_access_key),
+            cfg.r2_endpoint_url,
+        )
         raise HTTPException(409, row.error)
 
     row.status = "processing"

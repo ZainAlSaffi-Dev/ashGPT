@@ -149,7 +149,28 @@ class R2BlobStore:
         try:
             self._client.head_object(Bucket=self._bucket, Key=key)
             return True
-        except Exception:
+        except Exception as e:
+            # Distinguish "object not yet uploaded" (404 — normal during the
+            # poll window after presigned PUT) from auth / misconfig errors
+            # (401/403 — needs operator action). The former is silent; the
+            # latter is shouted so the next /process attempt's logs reveal
+            # exactly why the HEAD failed.
+            import logging
+
+            log = logging.getLogger(__name__)
+            err = getattr(e, "response", {}).get("Error", {}) if hasattr(e, "response") else {}
+            code = err.get("Code") or err.get("HTTPStatusCode") or ""
+            status_code = getattr(getattr(e, "response", None), "get", lambda *_: None)(
+                "ResponseMetadata", {}
+            ).get("HTTPStatusCode", "")
+            msg = err.get("Message") or str(e)
+            if str(code) in ("404", "NoSuchKey", "NotFound") or status_code == 404:
+                log.info("R2 HEAD miss bucket=%s key=%s", self._bucket, key)
+            else:
+                log.error(
+                    "R2 HEAD failed bucket=%s key=%s code=%s status=%s msg=%s",
+                    self._bucket, key, code, status_code, msg,
+                )
             return False
 
     def delete(self, key: str) -> None:
@@ -182,6 +203,24 @@ def make_blob_store() -> BlobStore:
     if s.blob_backend == "local":
         return LocalBlobStore(s.blob_local_root)
     if s.blob_backend == "r2":
+        # Fail loud at construction time if R2 creds are missing — otherwise
+        # boto3 silently builds a client that 401s on every call, which
+        # surfaces downstream as "blob missing" 409s and hours of debugging.
+        missing = [
+            n for n, v in [
+                ("r2_bucket", s.r2_bucket),
+                ("r2_account_id", s.r2_account_id),
+                ("r2_access_key", s.r2_access_key),
+                ("r2_secret_key", s.r2_secret_key),
+            ]
+            if not v
+        ]
+        if missing:
+            raise RuntimeError(
+                f"R2 backend selected but missing env vars: {missing}. "
+                "Set R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY (or R2_ACCESS_KEY / "
+                "R2_SECRET_KEY) and R2_ACCOUNT_ID / R2_BUCKET."
+            )
         return R2BlobStore(
             bucket=s.r2_bucket,
             account_id=s.r2_account_id,
