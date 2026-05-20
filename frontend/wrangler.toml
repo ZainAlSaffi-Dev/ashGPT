@@ -7,3 +7,11 @@ name = "lawgpt"
 pages_build_output_dir = ".vercel/output/static"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
+
+# Public-facing build-time vars (inlined into client JS by Next.js — these
+# are not secrets). Encrypted secrets (CLERK_SECRET_KEY, CLOUDFLARE_API_TOKEN)
+# stay in the dashboard.
+
+[vars]
+NEXT_PUBLIC_API_BASE = "https://lawgpt-edge.hypersonic3692.workers.dev"
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_test_c29saWQtZmx5LTE0LmNsZXJrLmFjY291bnRzLmRldiQ"
