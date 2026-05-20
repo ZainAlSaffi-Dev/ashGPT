@@ -179,6 +179,20 @@ _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
 
+def _normalize_async_url(url: str) -> str:
+    """Coerce plain Postgres URLs to the async psycopg3 driver scheme.
+
+    ``sqlalchemy.create_async_engine("postgresql://...")`` picks psycopg2
+    which isn't installed (we ship psycopg[binary]). Rewrite to
+    ``postgresql+psycopg://`` so the async psycopg3 dialect is used.
+    """
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://") :]
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg://" + url[len("postgresql://") :]
+    return url
+
+
 def get_engine(database_url: str | None = None) -> AsyncEngine:
     """Return the singleton engine. Call ``reset_engine`` between tests."""
     global _engine, _sessionmaker
@@ -187,6 +201,7 @@ def get_engine(database_url: str | None = None) -> AsyncEngine:
             from src.config import get_settings
 
             database_url = get_settings().database_url
+        database_url = _normalize_async_url(database_url)
         _engine = create_async_engine(database_url, echo=False, future=True)
         _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
     return _engine
