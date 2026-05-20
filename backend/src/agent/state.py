@@ -73,3 +73,20 @@ class AgentState(TypedDict, total=False):
     node_trace: list[str]
     timings: list[dict]  # [{"node": str, "ms": float, "sub": dict | None}]
     cache_hit: bool      # True when run_query short-circuited from semantic cache
+
+    # ── Chat-history audit ─────────────────────────────────────────────────
+    # Populated by prepare_chat_history_for_run when the incoming transcript
+    # was trimmed (turn-cap or per-message char-cap). UI can warn the user.
+    chat_history_overflow: dict  # {"dropped_turns": int, "truncated_messages": int}
+
+    # ── Follow-up rewriter (Stage 4) ───────────────────────────────────────
+    # Set by query_rewriter_node when a coreference-resolved search query is
+    # produced for retrieval. Logged so eval can compare with raw query.
+    rewritten_query: str
+
+    # ── Escalation audit ───────────────────────────────────────────────────
+    # When confidence-gated escalation kicks in, the synthesis node sees the
+    # override here and the route layer records both fields into the saved
+    # message's verification blob.
+    _override_synthesis_model: str
+    escalated: bool

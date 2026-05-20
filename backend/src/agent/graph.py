@@ -196,9 +196,11 @@ def run_query(
         initial_state["week_filter"] = week_filter
     if user_id:
         initial_state["user_id"] = user_id
-    prepared = prepare_chat_history_for_run(chat_history)
+    prepared, overflow = prepare_chat_history_for_run(chat_history)
     if prepared:
         initial_state["chat_history"] = prepared
+    if overflow["dropped_turns"] or overflow["truncated_messages"]:
+        initial_state["chat_history_overflow"] = overflow
 
     result = graph.invoke(initial_state)
 

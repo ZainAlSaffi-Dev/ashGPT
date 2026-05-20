@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from src.agent.graph import run_query
+from src.config import SYNTHESIS_MODEL
 from src.storage.db import Message, Session, User
 
 from .deps import current_user, db_session
@@ -78,6 +79,8 @@ async def chat(
     )
     db.add(user_msg)
     await db.commit()
+    await db.refresh(user_msg)
+    user_msg_id = user_msg.id
 
     # Capture vars for the closure
     user_id = user.id
@@ -126,9 +129,22 @@ async def chat(
                 yield _sse("verification", {"report": result["verification_report"]})
             if result.get("timings"):
                 yield _sse("timings", {"timings": result["timings"]})
+            overflow = result.get("chat_history_overflow")
+            if overflow:
+                yield _sse("history_overflow", overflow)
 
             final = result.get("final_answer", "")
             yield _sse("answer_chunk", {"text": final})
+
+            # Stamp the synthesis model + escalation flag onto the verification
+            # blob so the message log captures which model produced the final
+            # answer. Verification dict may be None (general intent path).
+            verification = dict(result.get("verification_report") or {})
+            escalated_to = result.get("escalated_to")
+            verification["synthesis_model"] = escalated_to or SYNTHESIS_MODEL
+            verification["escalated"] = bool(escalated_to)
+            if escalated_to:
+                verification["escalated_from"] = result.get("escalated_from")
 
             # Persist assistant message (await directly — bg task could lose the row).
             assistant_msg = Message(
@@ -139,7 +155,7 @@ async def chat(
                 intent=result.get("intent"),
                 retrieved_chunk_ids=[s.get("source") for s in sources if s.get("source")],
                 latency_ms=latency_ms,
-                verification=result.get("verification_report"),
+                verification=verification,
             )
             db.add(assistant_msg)
             await db.commit()
@@ -153,8 +169,17 @@ async def chat(
                     "final_answer": final,
                 },
             )
-        except Exception as e:  # pragma: no cover — surfaced to client
-            log.exception("chat stream failed")
+        except Exception as e:
+            # Graph failed mid-stream → roll back the orphan user message so
+            # the conversation history stays coherent for the next turn.
+            log.exception("chat stream failed; deleting orphan user message %s", user_msg_id)
+            try:
+                await db.execute(
+                    Message.__table__.delete().where(Message.id == user_msg_id)
+                )
+                await db.commit()
+            except Exception:  # pragma: no cover — last-ditch cleanup
+                log.exception("orphan rollback failed; manual cleanup required")
             yield _sse("error", {"detail": str(e)})
 
     return EventSourceResponse(stream())

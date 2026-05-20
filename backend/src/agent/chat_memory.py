@@ -15,10 +15,18 @@ from src.config import (
 )
 
 
-def prepare_chat_history_for_run(raw: list[dict[str, str]] | None) -> list[ChatMessage]:
-    """Normalise roles, strip empties, truncate long messages, cap turn count."""
+def prepare_chat_history_for_run(
+    raw: list[dict[str, str]] | None,
+) -> tuple[list[ChatMessage], dict]:
+    """Normalise roles, strip empties, truncate long messages, cap turn count.
+
+    Returns the prepared list **and** an overflow report so the caller can
+    surface it to the user / logs ("3 older turns trimmed to fit context").
+    The report shape is ``{"dropped_turns": int, "truncated_messages": int}``.
+    """
+    overflow = {"dropped_turns": 0, "truncated_messages": 0}
     if not raw:
-        return []
+        return [], overflow
     out: list[ChatMessage] = []
     for m in raw:
         role = m.get("role", "")
@@ -28,10 +36,12 @@ def prepare_chat_history_for_run(raw: list[dict[str, str]] | None) -> list[ChatM
         cap = CHAT_HISTORY_MAX_CHARS_PER_MESSAGE
         if len(content) > cap:
             content = content[:cap] + "\n… [truncated]"
+            overflow["truncated_messages"] += 1
         out.append({"role": role, "content": content})
     if len(out) > CHAT_HISTORY_MAX_MESSAGES:
+        overflow["dropped_turns"] = len(out) - CHAT_HISTORY_MAX_MESSAGES
         out = out[-CHAT_HISTORY_MAX_MESSAGES:]
-    return out
+    return out, overflow
 
 
 def format_transcript_for_llm(messages: list[ChatMessage]) -> str:
