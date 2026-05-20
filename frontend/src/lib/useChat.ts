@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '@clerk/nextjs';
 
 import { streamChat } from './streaming';
@@ -19,16 +19,43 @@ export interface ChatTurn {
   streaming?: boolean;
 }
 
-export function useChat() {
+export interface UseChatOptions {
+  /** Pre-existing session to continue (route param). */
+  initialSessionId?: string | null;
+  /** Server-hydrated turns to render before the first new send. */
+  initialTurns?: ChatTurn[];
+  /** Called the first time the backend returns a session_id — typically used
+   *  by the ``/chat`` (no-id) landing route to ``router.replace`` to
+   *  ``/chat/<id>`` so the URL becomes the source of truth.  */
+  onSessionCreated?: (sessionId: string) => void;
+}
+
+export function useChat(opts: UseChatOptions = {}) {
   const { getToken } = useAuth();
-  const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [turns, setTurns] = useState<ChatTurn[]>(opts.initialTurns ?? []);
   const [nodeTrace, setNodeTrace] = useState<string[]>([]);
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(
+    opts.initialSessionId ?? null,
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // If the parent route switches sessionId (sidebar nav, browser back),
+  // rebind. ``initialTurns`` is server-driven so we also reset turns when the
+  // session reference changes to avoid leaking previous-session messages.
+  const lastInitialSessionId = useRef<string | null | undefined>(opts.initialSessionId);
+  useEffect(() => {
+    if (opts.initialSessionId !== lastInitialSessionId.current) {
+      lastInitialSessionId.current = opts.initialSessionId;
+      setSessionId(opts.initialSessionId ?? null);
+      setTurns(opts.initialTurns ?? []);
+      setNodeTrace([]);
+      setError(null);
+    }
+  }, [opts.initialSessionId, opts.initialTurns]);
+
   const send = useCallback(
-    async (query: string, opts?: { week_filter?: string | null }) => {
+    async (query: string, sendOpts?: { week_filter?: string | null }) => {
       if (!query.trim() || busy) return;
       setBusy(true);
       setError(null);
@@ -48,7 +75,7 @@ export function useChat() {
       try {
         const token = (await getToken()) ?? undefined;
         await streamChat(
-          { query, session_id: sessionId, week_filter: opts?.week_filter ?? null },
+          { query, session_id: sessionId, week_filter: sendOpts?.week_filter ?? null },
           {
             onNode: (n) => setNodeTrace((trace) => [...trace, n]),
             onSources: (sources) => updateAssistant({ sources }),
@@ -62,6 +89,11 @@ export function useChat() {
                 ),
               ),
             onDone: ({ session_id, intent, latency_ms, final_answer }) => {
+              if (!sessionId && session_id) {
+                // First reply on the landing route — let the caller move
+                // the URL bar before the next turn so refresh / share works.
+                opts.onSessionCreated?.(session_id);
+              }
               setSessionId(session_id);
               updateAssistant({
                 intent,
@@ -85,15 +117,8 @@ export function useChat() {
         setBusy(false);
       }
     },
-    [busy, sessionId, getToken],
+    [busy, sessionId, getToken, opts],
   );
 
-  const reset = useCallback(() => {
-    setTurns([]);
-    setNodeTrace([]);
-    setSessionId(null);
-    setError(null);
-  }, []);
-
-  return { turns, send, reset, busy, error, sessionId, nodeTrace };
+  return { turns, send, busy, error, sessionId, nodeTrace };
 }

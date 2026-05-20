@@ -56,7 +56,9 @@ export interface FileMeta {
   size_bytes: number;
   status: 'uploaded' | 'processing' | 'queued' | 'ready' | 'failed';
   error?: string | null;
-  doc_type: 'note' | 'past_paper' | 'slide' | 'reading';
+  // Free-form so callers can categorise (case, statute, note, past_paper,
+  // transcript, slide, …) without the frontend imposing a fixed taxonomy.
+  doc_type: string;
   week: string | null;
   chunk_count: number;
   created_at: string;
