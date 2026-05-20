@@ -107,10 +107,11 @@ async function r2PresignPut(env: Env, body: { name: string; mime: string; user_i
   });
   const bucket = env.R2_BUCKET ?? 'lawgpt-uploads';
   const key = `${body.user_id}/${crypto.randomUUID()}/${body.name.replace(/[^\w.\-()]/g, '_')}`;
-  const endpoint = `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${bucket}/${key}`;
+  // 15-minute expiry encoded as a query param so it is included in the
+  // signature; aws4fetch has no `expiresIn` option.
+  const endpoint = `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${bucket}/${key}?X-Amz-Expires=900`;
   const signed = await aws.sign(new Request(endpoint, { method: 'PUT', headers: { 'content-type': body.mime } }), {
     aws: { signQuery: true },
-    expiresIn: 900,
   });
   return { upload_url: signed.url, blob_key: key };
 }
