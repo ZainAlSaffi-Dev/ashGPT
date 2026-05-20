@@ -1,0 +1,9 @@
+{
+  "name": "lawgpt-frontend",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Placeholder. Next.js 15 app initialised in Phase 3 on the `frontend` branch.",
+  "scripts": {
+    "dev": "echo 'Run `pnpm create next-app@latest .` to initialise the Next.js project, then replace this package.json.' && exit 1"
+  }
+}

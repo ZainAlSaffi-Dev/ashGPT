@@ -208,9 +208,32 @@ __marimo__/
 
 # data
 data/
+backend/data/
 
 # ChromaDB
 chroma_db/
+backend/chroma_db/
 
 # Evaluation outputs
+eval_results/
+backend/eval_results/
+
+# Cursor
 .cursorrules
+
+# OS
+.DS_Store
+
+# Node / Next.js
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+*.tsbuildinfo
+
+# Cloudflare Wrangler
+.wrangler/
+.dev.vars
+
+# Local secrets / state
+*.local.env

@@ -3,8 +3,9 @@
 from pathlib import Path
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-DATA_DIR = Path("data")
-CHROMA_DIR = Path("chroma_db")
+BACKEND_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = BACKEND_ROOT / "data"
+CHROMA_DIR = BACKEND_ROOT / "chroma_db"
 
 # ── Embeddings ─────────────────────────────────────────────────────────────────
 EMBEDDING_MODEL = "zembed-1"
