@@ -1,30 +1,26 @@
 'use client';
 
+import React from 'react';
 import { usePathname } from 'next/navigation';
-import { AnimatePresence, motion } from 'framer-motion';
+import { motion } from 'framer-motion';
 
-/** Cross-fade between routes within the (app) shell.
+/** Fade in routes within the (app) shell.
  *
- *  Tuned for *perceived* speed: ``mode="sync"`` so the new page paints
- *  immediately and the old one fades over it (no exit-then-enter wait),
- *  opacity-only (no Y translate that triggers a paint cost), 90ms total.
- *  Net effect: navigation feels instant; the brief fade just hides the
- *  hydration flicker without adding latency.
+ *  The app shell scrolls inside its own ``main`` element, not ``window``.
+ *  Keep this transition enter-only so the outgoing route cannot remain in
+ *  normal document flow above the incoming route while it fades out.
  */
 export function RouteTransition({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   return (
-    <AnimatePresence mode="sync" initial={false}>
-      <motion.div
-        key={pathname}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.09, ease: 'linear' }}
-        className="h-full"
-      >
-        {children}
-      </motion.div>
-    </AnimatePresence>
+    <motion.div
+      key={pathname}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.09, ease: 'linear' }}
+      className="min-h-full"
+    >
+      {children}
+    </motion.div>
   );
 }

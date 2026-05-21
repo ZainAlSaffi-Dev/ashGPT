@@ -211,6 +211,7 @@ Backend container picks up the same `[vars]` block as the worker (single `infra/
 9. **No `keepPreviousData` for per-session messages** — it can briefly render chat A's turns under chat B's URL during rapid session switching. Seed/cache only the exact `['messages', sessionId]` key.
 10. **Protected-route sign-in redirects must stay same-origin** — unauthenticated document navigations to `/chat` routes should redirect to `/?redirect_url=...`, not Clerk's account portal host. The landing page sanitizes that value before handing it to Clerk modal buttons.
 11. **Landing redirect must not wait on `getToken()`** — after modal sign-in, navigate as soon as Clerk reports `isSignedIn`; token readiness is handled by authed query gates. Waiting for a token on `/` can leave the user on the spinner until manual refresh.
+12. **Route transitions inside the app shell must be enter-only** — `AppShell` scrolls inside a custom `<main>`, so an exiting `AnimatePresence` route left in normal flow stacks the old page above the new one and makes workspace pages look blank until you scroll.
 
 ## Backend gotchas
 
@@ -263,6 +264,7 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - Project-scoped library v1: added project/folder persistence and CRUD, scoped file upload/list/move, scoped sessions/messages/chat snapshots, project/folder/file retrieval filters across dense + BM25, source metadata rehydration, and a basic frontend subject/folder library selector with scoped upload/chat plumbing.
 - Project-scoped library hardening: fixed landing post-login navigation, scoped cache invalidation, legacy-session scope mismatch rejection, recursive folder scope cleanup, delete cache invalidation, and removed CI-owned Cloudflare routes so main deploys can proceed with account-level tokens.
 - Project workspace revamp: `/library` is now a subject overview, subjects open `/library/[projectId]` workspaces with folder-scoped files/uploads/chat links, and the sidebar shows nested subject links.
+- Workspace navigation polish: route transitions are enter-only and the app shell resets its internal scroll container on pathname changes so subject workspace pages open at the top instead of stacking below the previous page.
 
 ---
 

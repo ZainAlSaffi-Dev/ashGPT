@@ -1,6 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import React from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { useAuth, UserButton } from '@clerk/nextjs';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -14,6 +15,7 @@ const SIDEBAR_HIDDEN_KEY = 'ashgpt:sidebar-hidden';
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [desktopHidden, setDesktopHidden] = useState(false);
+  const mainRef = useRef<HTMLElement | null>(null);
   const pathname = usePathname();
   const { getToken } = useAuth();
 
@@ -39,6 +41,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // route.
   useEffect(() => {
     setMobileOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    mainRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
   }, [pathname]);
 
   // Lock body scroll while the drawer is open — otherwise the page behind
@@ -146,7 +152,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <UserButton />
           </div>
         </header>
-        <main className="flex-1 overflow-y-auto">
+        <main ref={mainRef} className="flex-1 overflow-y-auto">
           <RouteTransition>{children}</RouteTransition>
         </main>
       </div>
