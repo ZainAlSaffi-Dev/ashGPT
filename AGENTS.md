@@ -226,6 +226,7 @@ Backend container picks up the same `[vars]` block as the worker (single `infra/
 4. **Scoped retrieval is two-legged.** Project/folder/file scope must be applied to both pgvector metadata filters and BM25 cache/search. BM25 cache keys are now `user_id:scope_hash`; invalidating a user must clear all keys with that prefix.
 5. **Worker routes are dashboard-managed.** `infra/wrangler.toml` intentionally does not declare `ashgpt.xyz/__clerk` routes; otherwise GitHub Actions needs zone-level `Workers Routes: Edit/Write` for `ashgpt.xyz` plus `Zone: Read` and fails with Cloudflare code 10000 when the token is account-only.
 6. **Upload rows are created before bytes land.** `/uploads/presign` registers the file, then the browser/Worker writes the blob, then `/process` indexes it. A missing blob must remain retryable, a failed blob transfer should delete the placeholder row, and zero extracted chunks should surface as a clear failed upload rather than a ready-but-useless file.
+7. **pgvector SSL EOFs are transient.** Managed Postgres can drop pooled SSL connections mid-search (`consuming input failed: SSL error: unexpected eof while reading`). `PgVectorStore` uses `pool_pre_ping`, retries once after disposing the pool, and chat SSE errors must stay redacted so SQL plus embedding vectors are never shown to users.
 
 ---
 
@@ -275,6 +276,7 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - Upload hardening: production uploads now stream through authenticated Worker `/uploads/blob` into R2 instead of direct browser → R2 CORS PUTs; Dropzone waits for Clerk tokens, validates/rejects unsupported files visibly, cleans up failed placeholder rows, blocks invalid folder scopes, and backend tests cover scoped upload/process retry.
 - Subject-chat and Pages deploy hardening: subject workspace chats now pre-create scoped sessions, `/chat/[sessionId]` rehydrates session scope before messages exist, global history hides subject chats, Mermaid loads client-side from CDN to shrink Cloudflare Pages Function output, frontend deploys use pnpm as the single package-manager path, and tests cover scoped session persistence.
 - Latency pass: scoped BM25 now enumerates only the selected project/folder/file rows, empty scoped chats short-circuit before LLM calls, chronology-only answers skip the final synthesis hop, and chat markdown tables get grid styling.
+- Vector DB resilience: pgvector search/list/write operations now retry once after transient SSL EOF connection drops and chat stream errors redact SQL plus embedding parameters.
 
 ---
 

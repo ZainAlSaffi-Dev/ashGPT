@@ -33,6 +33,38 @@ from typing import Any, Iterable, Protocol
 
 log = logging.getLogger(__name__)
 
+_TRANSIENT_DB_MARKERS = (
+    "ssl error",
+    "unexpected eof",
+    "consuming input failed",
+    "server closed the connection",
+    "connection reset",
+    "connection not open",
+    "terminating connection",
+)
+
+
+class VectorStoreUnavailable(RuntimeError):
+    """Raised when the vector database is temporarily unavailable."""
+
+
+def _is_transient_db_error(exc: Exception) -> bool:
+    try:
+        from sqlalchemy.exc import DBAPIError, OperationalError
+    except Exception:  # pragma: no cover - SQLAlchemy is a hard backend dep
+        return False
+    if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
+        return True
+    if not isinstance(exc, OperationalError):
+        return False
+    raw = str(getattr(exc, "orig", exc)).lower()
+    return any(marker in raw for marker in _TRANSIENT_DB_MARKERS)
+
+
+def _brief_db_error(exc: Exception) -> str:
+    raw = str(getattr(exc, "orig", exc)).strip()
+    return raw[:220] or type(exc).__name__
+
 
 @dataclass
 class VectorItem:
@@ -111,10 +143,37 @@ class PgVectorStore:
         sync_dsn = dsn.replace("+asyncpg", "+psycopg")
         if sync_dsn.startswith("postgresql://"):
             sync_dsn = sync_dsn.replace("postgresql://", "postgresql+psycopg://", 1)
-        self._engine = create_engine(sync_dsn, future=True)
+        self._engine = create_engine(
+            sync_dsn,
+            future=True,
+            pool_pre_ping=True,
+            pool_recycle=900,
+        )
         self._dim = dim
         self._table = table
         self._ensure_schema()
+
+    def _with_reconnect(self, operation: str, fn):
+        for attempt in range(2):
+            try:
+                return fn()
+            except Exception as exc:
+                if not _is_transient_db_error(exc):
+                    raise
+                if attempt == 0:
+                    log.warning(
+                        "pgvector %s connection dropped (%s); reconnecting once",
+                        operation,
+                        _brief_db_error(exc),
+                    )
+                    self._engine.dispose()
+                    continue
+                raise VectorStoreUnavailable(
+                    f"Vector database {operation} failed after reconnect; please retry in a moment."
+                ) from exc
+        raise VectorStoreUnavailable(
+            f"Vector database {operation} failed; please retry in a moment."
+        )
 
     # Stable int key for pg_advisory_xact_lock so multiple workers serialise
     # their schema creation. Value is arbitrary — chosen high to avoid
@@ -169,28 +228,31 @@ class PgVectorStore:
         items = list(items)
         if not items:
             return
-        with self._engine.begin() as conn:
-            for it in items:
-                conn.execute(
-                    text(
-                        f"""
-                        INSERT INTO {self._table} (id, namespace, content, metadata, embedding)
-                        VALUES (:id, :ns, :content, CAST(:meta AS JSONB), CAST(:emb AS VECTOR))
-                        ON CONFLICT (id) DO UPDATE
-                            SET namespace = EXCLUDED.namespace,
-                                content   = EXCLUDED.content,
-                                metadata  = EXCLUDED.metadata,
-                                embedding = EXCLUDED.embedding
-                        """
-                    ),
-                    {
-                        "id": it.id,
-                        "ns": it.namespace,
-                        "content": it.content,
-                        "meta": _json_dumps(it.metadata),
-                        "emb": _pg_vector_literal(it.vector),
-                    },
-                )
+        def _run() -> None:
+            with self._engine.begin() as conn:
+                for it in items:
+                    conn.execute(
+                        text(
+                            f"""
+                            INSERT INTO {self._table} (id, namespace, content, metadata, embedding)
+                            VALUES (:id, :ns, :content, CAST(:meta AS JSONB), CAST(:emb AS VECTOR))
+                            ON CONFLICT (id) DO UPDATE
+                                SET namespace = EXCLUDED.namespace,
+                                    content   = EXCLUDED.content,
+                                    metadata  = EXCLUDED.metadata,
+                                    embedding = EXCLUDED.embedding
+                            """
+                        ),
+                        {
+                            "id": it.id,
+                            "ns": it.namespace,
+                            "content": it.content,
+                            "meta": _json_dumps(it.metadata),
+                            "emb": _pg_vector_literal(it.vector),
+                        },
+                    )
+
+        self._with_reconnect("upsert", _run)
 
     def search(
         self,
@@ -211,8 +273,11 @@ class PgVectorStore:
             ORDER BY embedding <=> CAST(:emb AS VECTOR)
             LIMIT :k
         """
-        with self._engine.begin() as conn:
-            rows = conn.execute(text(sql), params).all()
+        def _run():
+            with self._engine.begin() as conn:
+                return conn.execute(text(sql), params).all()
+
+        rows = self._with_reconnect("search", _run)
         return [
             SearchHit(id=r[0], content=r[1], metadata=r[2] or {}, score=float(r[3])) for r in rows
         ]
@@ -223,11 +288,14 @@ class PgVectorStore:
         ids = list(ids)
         if not ids:
             return
-        with self._engine.begin() as conn:
-            conn.execute(
-                text(f"DELETE FROM {self._table} WHERE namespace = :ns AND id = ANY(:ids)"),
-                {"ns": namespace, "ids": ids},
-            )
+        def _run() -> None:
+            with self._engine.begin() as conn:
+                conn.execute(
+                    text(f"DELETE FROM {self._table} WHERE namespace = :ns AND id = ANY(:ids)"),
+                    {"ns": namespace, "ids": ids},
+                )
+
+        self._with_reconnect("delete", _run)
 
     def update_metadata(self, ids: Iterable[str], namespace: str, patch: dict[str, Any]) -> None:
         from sqlalchemy import text
@@ -235,26 +303,32 @@ class PgVectorStore:
         ids = list(ids)
         if not ids:
             return
-        with self._engine.begin() as conn:
-            conn.execute(
-                text(
-                    f"""
-                    UPDATE {self._table}
-                    SET metadata = metadata || CAST(:patch AS JSONB)
-                    WHERE namespace = :ns AND id = ANY(:ids)
-                    """
-                ),
-                {"ns": namespace, "ids": ids, "patch": _json_dumps(patch)},
-            )
+        def _run() -> None:
+            with self._engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"""
+                        UPDATE {self._table}
+                        SET metadata = metadata || CAST(:patch AS JSONB)
+                        WHERE namespace = :ns AND id = ANY(:ids)
+                        """
+                    ),
+                    {"ns": namespace, "ids": ids, "patch": _json_dumps(patch)},
+                )
+
+        self._with_reconnect("metadata update", _run)
 
     def delete_namespace(self, namespace: str) -> None:
         from sqlalchemy import text
 
-        with self._engine.begin() as conn:
-            conn.execute(
-                text(f"DELETE FROM {self._table} WHERE namespace = :ns"),
-                {"ns": namespace},
-            )
+        def _run() -> None:
+            with self._engine.begin() as conn:
+                conn.execute(
+                    text(f"DELETE FROM {self._table} WHERE namespace = :ns"),
+                    {"ns": namespace},
+                )
+
+        self._with_reconnect("namespace delete", _run)
 
     def list_namespace(
         self, namespace: str, where: dict[str, Any] | None = None
@@ -265,8 +339,11 @@ class PgVectorStore:
         params["ns"] = namespace
         meta_sql = (" AND " + " AND ".join(meta_clauses)) if meta_clauses else ""
         sql = f"SELECT id, content, metadata FROM {self._table} WHERE namespace = :ns{meta_sql}"
-        with self._engine.begin() as conn:
-            rows = conn.execute(text(sql), params).all()
+        def _run():
+            with self._engine.begin() as conn:
+                return conn.execute(text(sql), params).all()
+
+        rows = self._with_reconnect("namespace listing", _run)
         return [
             VectorItem(
                 id=r[0],

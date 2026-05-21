@@ -19,12 +19,14 @@ from typing import Annotated, AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from src.agent.graph import run_query
 from src.config import SYNTHESIS_MODEL
 from src.storage.db import Folder, Message, Project, Session, User
+from src.storage.vector_store import VectorStoreUnavailable
 
 from .deps import current_user, db_session
 from .schemas import ChatRequest, RetrievalScopeIn
@@ -35,6 +37,14 @@ log = logging.getLogger(__name__)
 
 def _sse(event: str, data: dict) -> dict:
     return {"event": event, "data": json.dumps(data)}
+
+
+def _public_error_detail(exc: Exception) -> str:
+    if isinstance(exc, VectorStoreUnavailable):
+        return str(exc)
+    if isinstance(exc, SQLAlchemyError):
+        return "A database connection dropped while preparing the answer. Please retry in a moment."
+    return str(exc)
 
 
 def _scopes_match(existing: dict | None, requested: dict | None) -> bool:
@@ -253,6 +263,6 @@ async def chat(
                 await db.commit()
             except Exception:  # pragma: no cover — last-ditch cleanup
                 log.exception("orphan rollback failed; manual cleanup required")
-            yield _sse("error", {"detail": str(e)})
+            yield _sse("error", {"detail": _public_error_detail(e)})
 
     return EventSourceResponse(stream())

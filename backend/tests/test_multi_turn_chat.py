@@ -176,6 +176,24 @@ async def test_failed_graph_rolls_back_orphan_user_message(client):
     ), f"orphan user message leaked into history: {history_seen_by_turn_3}"
 
 
+def test_public_error_detail_redacts_sql_and_embedding_params():
+    from sqlalchemy.exc import OperationalError
+
+    from api.routes_chat import _public_error_detail
+
+    err = OperationalError(
+        "SELECT id, content FROM vectors WHERE embedding <=> :emb",
+        {"emb": "[very long embedding vector]"},
+        Exception("SSL error: unexpected eof while reading"),
+    )
+
+    detail = _public_error_detail(err)
+
+    assert "retry in a moment" in detail
+    assert "SELECT" not in detail
+    assert "embedding" not in detail
+
+
 @pytest.mark.asyncio
 async def test_verification_records_synthesis_model_and_escalated_flag(client):
     """The saved assistant message must record which synthesis model ran."""

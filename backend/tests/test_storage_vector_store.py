@@ -8,8 +8,10 @@ import pytest
 
 from src.storage.vector_store import (
     InMemoryVectorStore,
+    PgVectorStore,
     SearchHit,
     VectorItem,
+    VectorStoreUnavailable,
     _cosine,
     _match_where,
     make_vector_store,
@@ -138,3 +140,83 @@ def test_search_returns_hits_in_score_order():
     assert isinstance(hits[0], SearchHit)
     assert hits[0].id == "near"
     assert hits[0].score >= hits[1].score
+
+
+class _FakeRows:
+    def all(self):
+        return [("hit", "Frazer v Walker content", {"source": "frazer.pdf"}, 0.91)]
+
+
+class _FakeConnection:
+    def __init__(self, engine):
+        self._engine = engine
+
+    def execute(self, *_args, **_kwargs):
+        from sqlalchemy.exc import OperationalError
+
+        self._engine.calls += 1
+        if self._engine.failures_remaining:
+            self._engine.failures_remaining -= 1
+            raise OperationalError(
+                "SELECT secret_vector",
+                {"emb": "[very long embedding vector]"},
+                Exception("SSL error: unexpected eof while reading"),
+            )
+        return _FakeRows()
+
+
+class _FakeBegin:
+    def __init__(self, engine):
+        self._engine = engine
+
+    def __enter__(self):
+        return _FakeConnection(self._engine)
+
+    def __exit__(self, *_args):
+        return False
+
+
+class _FakeEngine:
+    def __init__(self, failures_remaining):
+        self.calls = 0
+        self.disposals = 0
+        self.failures_remaining = failures_remaining
+
+    def begin(self):
+        return _FakeBegin(self)
+
+    def dispose(self):
+        self.disposals += 1
+
+
+def _pg_store_with_engine(engine) -> PgVectorStore:
+    store = PgVectorStore.__new__(PgVectorStore)
+    store._engine = engine
+    store._table = "vectors"
+    return store
+
+
+def test_pgvector_search_retries_transient_ssl_eof_once():
+    engine = _FakeEngine(failures_remaining=1)
+    store = _pg_store_with_engine(engine)
+
+    hits = store.search([0.1] * 4, namespace="u", k=1, where={"project_id": "p"})
+
+    assert engine.calls == 2
+    assert engine.disposals == 1
+    assert hits[0].id == "hit"
+
+
+def test_pgvector_search_raises_safe_error_after_retry_exhausted():
+    engine = _FakeEngine(failures_remaining=2)
+    store = _pg_store_with_engine(engine)
+
+    with pytest.raises(VectorStoreUnavailable) as exc:
+        store.search([0.1] * 4, namespace="u", k=1, where={"project_id": "p"})
+
+    detail = str(exc.value)
+    assert "retry in a moment" in detail
+    assert "SELECT" not in detail
+    assert "embedding" not in detail
+    assert engine.calls == 2
+    assert engine.disposals == 1
