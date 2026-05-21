@@ -132,6 +132,9 @@ async def chat(
             overflow = result.get("chat_history_overflow")
             if overflow:
                 yield _sse("history_overflow", overflow)
+            memory_telemetry = result.get("memory_telemetry")
+            if memory_telemetry:
+                yield _sse("memory", memory_telemetry)
 
             final = result.get("final_answer", "")
             yield _sse("answer_chunk", {"text": final})

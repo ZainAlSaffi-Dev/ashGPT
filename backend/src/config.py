@@ -90,6 +90,9 @@ ANSWER_CACHE_TTL_DAYS = 7
 CHAT_HISTORY_MAX_MESSAGES = 24
 CHAT_HISTORY_MAX_CHARS_PER_MESSAGE = 3500
 CHAT_HISTORY_MAX_ASSISTANT_TAIL_CHARS = 1200
+CHAT_MEMORY_MAX_SUMMARY_CHARS = 1800
+CHAT_MEMORY_MAX_FACTS = 24
+CHAT_MEMORY_MAX_FACT_CHARS = 260
 
 # Coreference-resolved retrieval query. When enabled and ``chat_history`` is
 # non-empty, retrieval_node calls a small router-tier model to expand

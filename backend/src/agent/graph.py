@@ -30,7 +30,7 @@ from src.agent.nodes import (
     synthesis_node,
     verification_node,
 )
-from src.agent.chat_memory import prepare_chat_history_for_run
+from src.agent.chat_memory import prepare_chat_memory_for_run
 from src.agent.state import AgentState
 from src.config import (
     ANSWER_CACHE_TTL_DAYS,
@@ -196,11 +196,21 @@ def run_query(
         initial_state["week_filter"] = week_filter
     if user_id:
         initial_state["user_id"] = user_id
-    prepared, overflow = prepare_chat_history_for_run(chat_history)
+    prepared, overflow, memory = prepare_chat_memory_for_run(chat_history)
     if prepared:
         initial_state["chat_history"] = prepared
-    if overflow["dropped_turns"] or overflow["truncated_messages"]:
+    if memory:
+        initial_state["conversation_memory"] = memory
+    if overflow["memory_compressed"] or overflow["truncated_messages"]:
         initial_state["chat_history_overflow"] = overflow
+        initial_state["memory_telemetry"] = {
+            "memory_compressed": overflow["memory_compressed"],
+            "compressed_turns": overflow["compressed_turns"],
+            "recent_messages": overflow["recent_messages"],
+            "memory_fact_count": overflow["memory_fact_count"],
+            "memory_summary_chars": overflow["memory_summary_chars"],
+            "truncated_messages": overflow["truncated_messages"],
+        }
 
     result = graph.invoke(initial_state)
 

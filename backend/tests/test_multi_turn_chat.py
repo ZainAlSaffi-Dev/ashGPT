@@ -63,6 +63,28 @@ def _fake_state(answer: str) -> dict:
     }
 
 
+def _fake_state_with_memory(answer: str) -> dict:
+    state = _fake_state(answer)
+    state["chat_history_overflow"] = {
+        "dropped_turns": 12,
+        "truncated_messages": 0,
+        "memory_compressed": True,
+        "compressed_turns": 12,
+        "recent_messages": 24,
+        "memory_fact_count": 3,
+        "memory_summary_chars": 120,
+    }
+    state["memory_telemetry"] = {
+        "memory_compressed": True,
+        "compressed_turns": 12,
+        "recent_messages": 24,
+        "memory_fact_count": 3,
+        "memory_summary_chars": 120,
+        "truncated_messages": 0,
+    }
+    return state
+
+
 async def _post_chat(client: AsyncClient, query: str, session_id: str | None) -> dict:
     body = {"query": query}
     if session_id:
@@ -177,3 +199,16 @@ async def test_verification_records_synthesis_model_and_escalated_flag(client):
     assert vr["synthesis_model"] == "gpt-5.4"
     assert vr["escalated"] is True
     assert vr["escalated_from"] == "gpt-5.4-mini"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_memory_compression_telemetry(client):
+    def _fake(query: str, week_filter, chat_history, user_id):
+        return _fake_state_with_memory("compressed answer")
+
+    with patch("api.routes_chat.run_query", side_effect=_fake):
+        r = await _post_chat(client, "Long chat follow-up", None)
+
+    assert "event: history_overflow" in r["text"]
+    assert "event: memory" in r["text"]
+    assert '"memory_compressed": true' in r["text"]

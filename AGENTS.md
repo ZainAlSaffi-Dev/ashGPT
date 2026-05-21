@@ -214,6 +214,7 @@ Backend container picks up the same `[vars]` block as the worker (single `infra/
 
 1. **No proper Alembic yet.** `init_db` runs `create_all` then idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for post-v1 columns on Postgres. SQLite (tests) skips the ALTERs because `create_all` already produces the right schema on a fresh DB. When you add new columns, append to `_apply_inline_migrations` in `backend/src/storage/db.py`.
 2. **Secrets** never go into Codex at all. No API keys, tokens, passwords, connection strings in chat or in code committed to the repo.
+3. **Conversation memory is not source evidence.** `conversation_memory` is rebuilt per session from older persisted turns and may resolve shorthand, jurisdiction, goals, corrections, and authorities already discussed, but answer facts still need retrieved `[S#]` citations or `[external]`.
 
 ---
 
@@ -253,6 +254,7 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - Performance/stability pass: chat streams now abort on unmount/session switch, first-session completion seeds exact message/session caches before URL promotion, per-session message queries no longer reuse previous-session data, cold history rehydrates when messages arrive, and the first-run tour lazy-loads after the app shell paints.
 - Protected-route redirect fix: unauthenticated browser visits to signed-in pages now redirect to the same-origin landing page with a sanitized `redirect_url`, avoiding the broken `accounts.ashgpt.xyz` account-portal hop while preserving deep-link intent after modal sign-in.
 - Future-session planning: added focused handoff prompts for a next-generation in-chat memory system and a browser-driven frontend animation/refresh/endpoint QA pass.
+- In-chat memory v1: backend now keeps the latest 24 messages verbatim, compresses older persisted turns into per-session `conversation_memory`, feeds that into router/retrieval/synthesis with explicit grounding boundaries, and emits `memory` SSE telemetry when compression occurs.
 
 ---
 
@@ -277,48 +279,17 @@ Optimization targets:
 
 ---
 
-## In-chat memory handoff
+## In-chat memory
 
-The current multi-turn memory path is intentionally simple: `backend/api/routes_chat.py` loads persisted session messages, `backend/src/agent/chat_memory.py` validates/trims/formats history, and `backend/src/config.py` caps history with `CHAT_HISTORY_MAX_MESSAGES = 24`. That means long chats mostly behave like a rolling window: old turns fall out, long messages are truncated, and the model can lose durable user intent, definitions, cited facts, and resolved references.
+Current model: `backend/api/routes_chat.py` loads all persisted rows for a session. `backend/src/agent/graph.py` calls `prepare_chat_memory_for_run`, keeps the newest `CHAT_HISTORY_MAX_MESSAGES = 24` rows as verbatim `chat_history`, and compresses older rows into `conversation_memory`.
 
-Next memory workstream goal: design and implement the best practical in-chat memory system for ashGPT without sacrificing grounded legal accuracy.
+The compressed memory contains deterministic summary text plus typed facts: jurisdiction, shorthand, study goals, source constraints, authorities discussed, and corrections. Router, retrieval, ratio, chronology, synthesis, and the query rewriter receive this memory. Retrieval packing uses memory anchors so >24-turn follow-ups can still resolve terms like "AP" or "that case".
 
-Prompt for the next session:
+Grounding rule: compressed memory is session context only. It must never be cited as legal authority. Prompts explicitly tell the model that every legal proposition still needs retrieved `[S#]` support or an `[external]` marker.
 
-```text
-You are working in /Users/zer0/Documents/projects/ashGPT. Read AGENTS.md first.
+Telemetry: long chats emit the existing `history_overflow` event plus a `memory` SSE event containing `memory_compressed`, `compressed_turns`, `recent_messages`, `memory_fact_count`, `memory_summary_chars`, and `truncated_messages`.
 
-Focus only on in-chat memory and long-conversation quality. Do not restart auth, routing, or visual polish work unless it directly blocks memory testing.
-
-Primary objective: replace the simple rolling 24-message memory behavior with a stronger architecture that preserves useful conversation context over long study sessions while keeping answers grounded in uploaded sources.
-
-Current starting points:
-- backend/src/agent/chat_memory.py handles validation, trimming, transcript formatting, retrieval-query packing, and follow-up rewriting.
-- backend/api/routes_chat.py loads persisted session history and emits `history_overflow` SSE events.
-- backend/src/config.py currently has `CHAT_HISTORY_MAX_MESSAGES = 24` plus per-message truncation settings.
-- backend/tests/test_chat_memory.py, backend/tests/test_multi_turn_chat.py, backend/tests/test_query_rewriter.py, and backend/tests/test_cache.py cover existing behavior.
-
-Investigate and design:
-1. Map the full memory flow from persisted DB rows -> prepared history -> query rewrite -> retrieval -> synthesis -> verification -> persisted assistant message.
-2. Identify what context must be preserved for a law-study assistant: user goals, jurisdiction/course/module, defined shorthand, cited authorities already discussed, issue framing, prior conclusions, unresolved follow-ups, and source-grounding constraints.
-3. Compare options: rolling window, hierarchical summaries, episodic facts, retrieval over prior turns, source-aware memory snippets, and hybrid recent-window + durable summary.
-4. Design a deterministic memory contract: what is stored, when it updates, how it is cited or explicitly marked as conversation memory, how stale/incorrect memory is corrected, and how it avoids inventing legal authority.
-5. Decide whether schema changes are needed. If so, remember this project has no proper Alembic yet; add idempotent inline migrations in backend/src/storage/db.py.
-6. Preserve privacy and namespace isolation. Memory must be per user/session unless a deliberate cross-session study profile is explicitly designed and accepted.
-
-Implementation expectations:
-- Prefer a hybrid design: recent verbatim turns + compact running summary + structured memory facts + retrieval over prior turns only if profiling justifies it.
-- Make memory updates observable in tests. Add examples for long chats where early constraints still affect later answers after >24 turns.
-- Keep `history_overflow` or replace it with a clearer telemetry event so the frontend can explain when memory has been compressed.
-- Add eval-style tests for coreference, corrections ("actually ignore that"), jurisdiction changes, and source-grounding boundaries.
-- Measure prompt size and latency before/after. Do not add Redis/vector infrastructure for memory unless local DB/browser/query approaches are proven insufficient.
-
-Deliverables:
-- Architecture note or ADR for the chosen memory model.
-- Code + tests implementing the first production-ready version.
-- Short report with behavior examples, token/latency impact, and known limitations.
-- Updated AGENTS.md with any durable memory gotchas.
-```
+Design note: see `docs/in_chat_memory_adr.md`. No schema change was added for v1; memory is rebuilt from per-session rows to avoid stale persisted summaries.
 
 ---
 

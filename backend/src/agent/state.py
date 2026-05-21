@@ -30,6 +30,16 @@ class ChatMessage(TypedDict):
     content: str
 
 
+class ConversationMemory(TypedDict, total=False):
+    """Compressed session memory built from turns outside the recent window."""
+
+    summary: str
+    facts: list[dict[str, str]]
+    corrections: list[str]
+    compressed_turns: int
+    source_grounding: str
+
+
 class AgentState(TypedDict, total=False):
     """Full state flowing through the LangGraph pipeline.
 
@@ -43,6 +53,7 @@ class AgentState(TypedDict, total=False):
     query: str
     week_filter: str | None
     chat_history: list[ChatMessage]  # prior turns only; current message is ``query``
+    conversation_memory: ConversationMemory  # compressed older turns; never source evidence
     user_id: str | None  # tenant namespace; None ⇒ shared/legacy collection
 
     # ── Router output ──────────────────────────────────────────────────────
@@ -78,6 +89,7 @@ class AgentState(TypedDict, total=False):
     # Populated by prepare_chat_history_for_run when the incoming transcript
     # was trimmed (turn-cap or per-message char-cap). UI can warn the user.
     chat_history_overflow: dict  # {"dropped_turns": int, "truncated_messages": int}
+    memory_telemetry: dict  # compression stats safe to expose over SSE
 
     # ── Follow-up rewriter (Stage 4) ───────────────────────────────────────
     # Set by query_rewriter_node when a coreference-resolved search query is

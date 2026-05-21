@@ -19,8 +19,10 @@ from dotenv import load_dotenv
 
 from src.agent.chat_memory import (
     build_retrieval_query,
+    format_memory_for_llm,
     format_transcript_for_llm,
     get_chat_history,
+    get_conversation_memory,
     rewrite_followup_query,
 )
 from src.agent.state import AgentState
@@ -177,12 +179,16 @@ def router_node(state: AgentState) -> dict:
     """
     query = state["query"]
     history = get_chat_history(state)
+    memory = get_conversation_memory(state)
     log.info("RouterNode: classifying query (history_turns=%d)", len(history))
 
-    if history:
+    if history or memory:
+        memory_block = format_memory_for_llm(memory)
+        memory_prefix = f"{memory_block}\n\n" if memory_block else ""
         transcript = format_transcript_for_llm(history)
         router_input = (
-            f"CONVERSATION SO FAR:\n{transcript}\n\n"
+            f"{memory_prefix}"
+            f"RECENT CONVERSATION SO FAR:\n{transcript}\n\n"
             f"LATEST STUDENT MESSAGE (classify this):\n{query}"
         )
     else:
@@ -231,6 +237,7 @@ def retrieval_node(state: AgentState) -> dict:
     from src.config import USE_QUERY_REWRITER
 
     history = get_chat_history(state)
+    memory = get_conversation_memory(state)
     raw_query = state["query"]
 
     # On follow-up turns optionally run a coreference rewrite so the retriever
@@ -238,15 +245,15 @@ def retrieval_node(state: AgentState) -> dict:
     # elements of adverse possession in Mabo v Queensland (No 2)"). Skip on
     # first turns — no transcript to resolve and the LLM hop is dead weight.
     rewritten_query: str | None = None
-    if history and USE_QUERY_REWRITER:
-        rewritten_query = rewrite_followup_query(raw_query, history)
+    if (history or memory) and USE_QUERY_REWRITER:
+        rewritten_query = rewrite_followup_query(raw_query, history, memory=memory)
         if rewritten_query == raw_query:
             rewritten_query = None  # rewriter returned the input unchanged
 
     embed_query = rewritten_query or raw_query
     # Always run the deterministic packer on top — it appends the prior
     # assistant excerpt so the dense embedding has even more anchor signal.
-    search_q = build_retrieval_query(embed_query, history)
+    search_q = build_retrieval_query(embed_query, history, memory)
 
     week = state.get("week_filter")
     namespace = state.get("user_id")
@@ -391,6 +398,12 @@ def ratio_extractor_node(state: AgentState) -> dict:
     query = state["query"]
     context = _format_context(state)
     history = get_chat_history(state)
+    memory = get_conversation_memory(state)
+    memory_block = (
+        f"{format_memory_for_llm(memory)}\n\n"
+        if memory
+        else ""
+    )
     hist_block = (
         f"CONVERSATION HISTORY:\n{format_transcript_for_llm(history)}\n\n"
         if history
@@ -398,6 +411,7 @@ def ratio_extractor_node(state: AgentState) -> dict:
     )
 
     prompt = (
+        f"{memory_block}"
         f"{hist_block}"
         f"CURRENT USER QUESTION: {query}\n\n"
         f"SOURCE MATERIAL:\n{context}\n\n"
@@ -480,6 +494,12 @@ def chronology_node(state: AgentState) -> dict:
     query = state["query"]
     context = _format_context(state)
     history = get_chat_history(state)
+    memory = get_conversation_memory(state)
+    memory_block = (
+        f"{format_memory_for_llm(memory)}\n\n"
+        if memory
+        else ""
+    )
     hist_block = (
         f"CONVERSATION HISTORY:\n{format_transcript_for_llm(history)}\n\n"
         if history
@@ -487,6 +507,7 @@ def chronology_node(state: AgentState) -> dict:
     )
 
     prompt = (
+        f"{memory_block}"
         f"{hist_block}"
         f"CURRENT USER QUESTION: {query}\n\n"
         f"SOURCE MATERIAL:\n{context}\n\n"
@@ -585,8 +606,12 @@ def synthesis_node(state: AgentState) -> dict:
     intent = state.get("intent", "general")
     context = _format_context(state)
     history = get_chat_history(state)
+    memory = get_conversation_memory(state)
 
     sections: list[str] = []
+    if memory:
+        sections.append(format_memory_for_llm(memory))
+        sections.append("")
     if history:
         sections.append(
             "CONVERSATION HISTORY (session memory — use to interpret follow-ups):\n"
@@ -768,5 +793,3 @@ def verification_node(state: AgentState) -> dict:
         "verification_report": report,
         "node_trace": _append_trace(state, "verification"),
     }
-
-

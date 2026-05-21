@@ -70,3 +70,34 @@ def test_rewrite_returns_original_when_llm_returns_empty() -> None:
 
     out = rewrite_followup_query("again?", history, llm_call=empty, model="x")
     assert out == "again?"
+
+
+def test_rewrite_can_use_compressed_memory_without_recent_history() -> None:
+    memory = {
+        "summary": "",
+        "facts": [
+            {
+                "type": "authority_discussed",
+                "text": "Earlier authority discussed: Mabo v Queensland (No 2).",
+            }
+        ],
+        "source_grounding": "Compressed conversation memory is not source evidence.",
+        "compressed_turns": 30,
+    }
+    captured: dict = {}
+
+    def fake_llm(prompt: str, model: str, system_instruction: str) -> str:
+        captured["prompt"] = prompt
+        return "Explain the ratio decidendi in Mabo v Queensland (No 2)."
+
+    out = rewrite_followup_query(
+        "what was the ratio?",
+        [],
+        memory=memory,
+        llm_call=fake_llm,
+        model="x",
+    )
+
+    assert out == "Explain the ratio decidendi in Mabo v Queensland (No 2)."
+    assert "COMPRESSED CONVERSATION MEMORY" in captured["prompt"]
+    assert "Mabo v Queensland" in captured["prompt"]
