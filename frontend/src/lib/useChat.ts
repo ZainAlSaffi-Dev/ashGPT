@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '@clerk/nextjs';
 
+import { AuthNotReadyError, withAuth } from './api';
 import { streamChat } from './streaming';
 import type {
   ChatHistoryOverflow,
@@ -79,46 +80,52 @@ export function useChat(opts: UseChatOptions = {}) {
         setTurns((t) => t.map((x) => (x.id === assistantId ? { ...x, ...patch } : x)));
 
       try {
-        const token = (await getToken()) ?? undefined;
-        await streamChat(
-          { query, session_id: sessionId, week_filter: sendOpts?.week_filter ?? null },
-          {
-            onNode: (n) => setNodeTrace((trace) => [...trace, n]),
-            onSources: (sources) => updateAssistant({ sources }),
-            onIRAC: (irac) => updateAssistant({ irac }),
-            onMermaid: (mermaid) => updateAssistant({ mermaid }),
-            onVerification: (verification) => updateAssistant({ verification }),
-            onHistoryOverflow: (overflow) =>
-              updateAssistant({ historyOverflow: overflow }),
-            onAnswerChunk: (text) =>
-              setTurns((t) =>
-                t.map((x) =>
-                  x.id === assistantId ? { ...x, content: x.content + text } : x,
+        await withAuth(getToken, (token) =>
+          streamChat(
+            { query, session_id: sessionId, week_filter: sendOpts?.week_filter ?? null },
+            {
+              onNode: (n) => setNodeTrace((trace) => [...trace, n]),
+              onSources: (sources) => updateAssistant({ sources }),
+              onIRAC: (irac) => updateAssistant({ irac }),
+              onMermaid: (mermaid) => updateAssistant({ mermaid }),
+              onVerification: (verification) => updateAssistant({ verification }),
+              onHistoryOverflow: (overflow) =>
+                updateAssistant({ historyOverflow: overflow }),
+              onAnswerChunk: (text) =>
+                setTurns((t) =>
+                  t.map((x) =>
+                    x.id === assistantId ? { ...x, content: x.content + text } : x,
+                  ),
                 ),
-              ),
-            onDone: ({ session_id, intent, latency_ms, final_answer }) => {
-              if (!sessionId && session_id) {
-                // First reply on the landing route — let the caller move
-                // the URL bar before the next turn so refresh / share works.
-                opts.onSessionCreated?.(session_id);
-              }
-              setSessionId(session_id);
-              updateAssistant({
-                intent,
-                latency_ms,
-                streaming: false,
-                content: final_answer || '',
-              });
+              onDone: ({ session_id, intent, latency_ms, final_answer }) => {
+                if (!sessionId && session_id) {
+                  // First reply on the landing route — let the caller move
+                  // the URL bar before the next turn so refresh / share works.
+                  opts.onSessionCreated?.(session_id);
+                }
+                setSessionId(session_id);
+                updateAssistant({
+                  intent,
+                  latency_ms,
+                  streaming: false,
+                  content: final_answer || '',
+                });
+              },
+              onError: (detail) => {
+                setError(detail);
+                updateAssistant({ streaming: false, content: `_error: ${detail}_` });
+              },
             },
-            onError: (detail) => {
-              setError(detail);
-              updateAssistant({ streaming: false, content: `_error: ${detail}_` });
-            },
-          },
-          { token },
+            { token, getFreshToken: () => getToken({ skipCache: true }) },
+          ),
         );
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg =
+          e instanceof AuthNotReadyError
+            ? 'Still signing you in. Please try again in a moment.'
+            : e instanceof Error
+              ? e.message
+              : String(e);
         setError(msg);
         updateAssistant({ streaming: false, content: `_error: ${msg}_` });
       } finally {

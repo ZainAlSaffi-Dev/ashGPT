@@ -41,7 +41,12 @@ export async function streamChat(
     week_filter?: string | null;
   },
   handlers: ChatStreamHandlers,
-  opts?: { token?: string; signal?: AbortSignal },
+  opts?: {
+    token?: string;
+    signal?: AbortSignal;
+    getFreshToken?: () => Promise<string | null>;
+  },
+  attempt = 0,
 ): Promise<void> {
   const headers = new Headers({
     'Content-Type': 'application/json',
@@ -60,7 +65,15 @@ export async function streamChat(
     signal: opts?.signal,
   });
   if (!res.ok || !res.body) {
-    handlers.onError?.(`HTTP ${res.status}`);
+    if (res.status === 401 && attempt === 0 && opts?.getFreshToken) {
+      const fresh = await opts.getFreshToken().catch(() => null);
+      if (fresh) {
+        await streamChat(body, handlers, { ...opts, token: fresh }, attempt + 1);
+        return;
+      }
+    }
+    const detail = await res.text().catch(() => '');
+    handlers.onError?.(`HTTP ${res.status}${detail ? `: ${detail}` : ''}`);
     return;
   }
 

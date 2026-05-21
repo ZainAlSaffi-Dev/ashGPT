@@ -23,6 +23,7 @@ export interface Env {
   CLERK_ISSUER: string;
   CLERK_SECRET_KEY: string;
   CLERK_FAPI?: string;
+  CLERK_JWKS_URL?: string;
   CLERK_PROXY_URL?: string;
   CORS_ORIGINS?: string;
   // Backend container secrets — forwarded into the container via envVars.
@@ -68,7 +69,10 @@ let _jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
 
 function getJwks(env: Env) {
   if (_jwks) return _jwks;
-  const url = new URL('.well-known/jwks.json', env.CLERK_ISSUER.replace(/\/$/, '') + '/');
+  const url = new URL(
+    env.CLERK_JWKS_URL || '.well-known/jwks.json',
+    env.CLERK_ISSUER.replace(/\/$/, '') + '/',
+  );
   _jwks = createRemoteJWKSet(url);
   return _jwks;
 }
@@ -276,6 +280,7 @@ export class LawgptBackend extends Container<Env> {
     GOOGLE_API_KEY: this.env.GOOGLE_API_KEY ?? '',
     ZEMBED_API_KEY: this.env.ZEMBED_API_KEY ?? '',
     COHERE_API_KEY: this.env.COHERE_API_KEY ?? '',
+    CLERK_JWKS_URL: this.env.CLERK_JWKS_URL ?? '',
     CLERK_ISSUER: this.env.CLERK_ISSUER ?? '',
     CLERK_SECRET_KEY: this.env.CLERK_SECRET_KEY ?? '',
     R2_ACCESS_KEY_ID: this.env.R2_ACCESS_KEY_ID ?? '',

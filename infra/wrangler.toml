@@ -69,9 +69,11 @@ new_sqlite_classes = ["LawgptBackend"]
 
 [vars]
 # Production Clerk instance on the custom domain ``clerk.ashgpt.xyz``.
-# JWKS is derived as ``<CLERK_ISSUER>/.well-known/jwks.json``.
+# JWKS is fetched through the Clerk frontend proxy so key discovery follows
+# the same healthy path as the browser SDK.
 CLERK_ISSUER = "https://clerk.ashgpt.xyz"
 CLERK_FAPI = "https://frontend-api.clerk.dev"
+CLERK_JWKS_URL = "https://ashgpt.xyz/__clerk/.well-known/jwks.json"
 CLERK_PROXY_URL = "https://ashgpt.xyz/__clerk"
 CORS_ORIGINS = "https://ashgpt.xyz,https://www.ashgpt.xyz,https://ashgpt.pages.dev,http://localhost:3000"
 R2_BUCKET = "lawgpt-uploads"

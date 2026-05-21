@@ -22,7 +22,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   // NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY via Pages env vars.
   if (!clerkKey) return tree;
   return (
-    <ClerkProvider publishableKey={clerkKey} proxyUrl={clerkProxyUrl}>
+    <ClerkProvider
+      publishableKey={clerkKey}
+      proxyUrl={clerkProxyUrl}
+      signInFallbackRedirectUrl="/chat"
+      signInForceRedirectUrl="/chat"
+      signUpFallbackRedirectUrl="/chat"
+      signUpForceRedirectUrl="/chat"
+    >
       {tree}
     </ClerkProvider>
   );

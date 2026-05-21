@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { dispatch, parseSSEStream } from './streaming';
+import { dispatch, parseSSEStream, streamChat } from './streaming';
 
 describe('dispatch', () => {
   it('parses JSON node events', () => {
@@ -84,5 +84,54 @@ describe('parseSSEStream', () => {
       'chunk:Adverse possession is...',
       'done:s1:ratio',
     ]);
+  });
+});
+
+describe('streamChat', () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('refreshes the Clerk token once when the stream request gets a 401', async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(
+            'event: done\ndata: {"session_id":"s1","intent":null,"latency_ms":1,"final_answer":"ok"}\n\n',
+          ),
+        );
+        controller.close();
+      },
+    });
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(
+        new Response(stream, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+      );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const onDone = vi.fn();
+
+    await streamChat(
+      { query: 'hello' },
+      { onDone },
+      { token: 'stale-token', getFreshToken: async () => 'fresh-token' },
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('Authorization')).toBe(
+      'Bearer fresh-token',
+    );
+    expect(onDone).toHaveBeenCalledWith({
+      session_id: 's1',
+      intent: null,
+      latency_ms: 1,
+      final_answer: 'ok',
+    });
   });
 });

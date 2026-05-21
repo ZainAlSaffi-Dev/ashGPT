@@ -2,7 +2,7 @@
 
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { SignInButton, useAuth } from '@clerk/nextjs';
+import { SignInButton, SignUpButton, useAuth } from '@clerk/nextjs';
 import { motion } from 'framer-motion';
 import { BookMarked } from 'lucide-react';
 
@@ -53,9 +53,16 @@ export default function LandingPage() {
         </p>
         <div className="mt-8 flex items-center justify-center gap-3">
           {isLoaded && !isSignedIn && (
-            <SignInButton mode="modal">
-              <Button size="lg">Sign in</Button>
-            </SignInButton>
+            <>
+              <SignUpButton mode="modal" forceRedirectUrl="/chat" fallbackRedirectUrl="/chat">
+                <Button size="lg">Create account</Button>
+              </SignUpButton>
+              <SignInButton mode="modal" forceRedirectUrl="/chat" fallbackRedirectUrl="/chat">
+                <Button size="lg" variant="secondary">
+                  Sign in
+                </Button>
+              </SignInButton>
+            </>
           )}
           {isLoaded && isSignedIn && (
             <Button size="lg" asChild>
