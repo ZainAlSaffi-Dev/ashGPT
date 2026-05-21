@@ -274,6 +274,7 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - Project workspace sessions: subject pages now show a scoped recent-chats panel with resume links and a new subject-chat action backed by `useSessions({ projectId })`.
 - Upload hardening: production uploads now stream through authenticated Worker `/uploads/blob` into R2 instead of direct browser → R2 CORS PUTs; Dropzone waits for Clerk tokens, validates/rejects unsupported files visibly, cleans up failed placeholder rows, blocks invalid folder scopes, and backend tests cover scoped upload/process retry.
 - Subject-chat and Pages deploy hardening: subject workspace chats now pre-create scoped sessions, `/chat/[sessionId]` rehydrates session scope before messages exist, global history hides subject chats, Mermaid loads client-side from CDN to shrink Cloudflare Pages Function output, frontend deploys use pnpm as the single package-manager path, and tests cover scoped session persistence.
+- Latency pass: scoped BM25 now enumerates only the selected project/folder/file rows, empty scoped chats short-circuit before LLM calls, chronology-only answers skip the final synthesis hop, and chat markdown tables get grid styling.
 
 ---
 

@@ -71,9 +71,17 @@ def _route_after_cache_check(state: AgentState) -> str:
     if state.get("cache_hit"):
         log.info("Routing: cache_hit → END")
         return "cache_hit"
+    if state.get("no_material_reason"):
+        log.info("Routing: selected scope has no material → END")
+        return "no_material"
     intent = state.get("intent", "general")
     log.info("Routing (post-cache miss): intent=%s", intent)
     return intent
+
+
+def _route_after_chronology(state: AgentState) -> str:
+    """Chronology-only answers are complete after diagram generation."""
+    return "synthesis" if state.get("intent") == "summary" else "complete"
 
 
 # ── Graph construction ─────────────────────────────────────────────────────────
@@ -112,6 +120,7 @@ def build_graph() -> StateGraph:
         path=_route_after_cache_check,
         path_map={
             "cache_hit": END,
+            "no_material": END,
             "ratio": "ratio_extractor",
             "chronology": "chronology",
             "summary": "ratio_extractor",  # summary runs ratio first, then chronology
@@ -132,7 +141,14 @@ def build_graph() -> StateGraph:
         },
     )
 
-    graph.add_edge("chronology", "synthesis")
+    graph.add_conditional_edges(
+        source="chronology",
+        path=_route_after_chronology,
+        path_map={
+            "synthesis": "synthesis",
+            "complete": "verification" if USE_VERIFICATION else END,
+        },
+    )
 
     # 6. Synthesis → verification (if enabled) → END.
     #    Verification fact-checks cited cases against retrieved sources and

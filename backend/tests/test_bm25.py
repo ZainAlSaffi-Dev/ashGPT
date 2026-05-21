@@ -234,6 +234,26 @@ def test_scoped_indexes_cache_independently_and_invalidate_by_namespace():
     assert [h[0] for h in rebuilt_p1.search("estoppel", k=3)] == ["p1", "p3"]
 
 
+def test_source_receives_scope_filter_before_index_build():
+    rows = [
+        ("p1", "project one estoppel", {"project_id": "p1"}),
+        ("p2", "project two estoppel", {"project_id": "p2"}),
+    ]
+    seen: list[dict | None] = []
+
+    def source(_ns, where=None):
+        seen.append(where)
+        return [row for row in rows if not where or row[2].get("project_id") == where.get("project_id")]
+
+    configure_bm25_source(source)
+    invalidate()
+    idx = get_bm25_index("u", scope_hash="scope_p1", where={"project_id": "p1"})
+
+    assert seen == [{"project_id": "p1"}]
+    assert len(idx) == 1
+    assert [h[0] for h in idx.search("estoppel", k=2)] == ["p1"]
+
+
 def test_doc_id_alignment_after_round_trip():
     """End-to-end ranking example with realistic legal text."""
     corpus = [

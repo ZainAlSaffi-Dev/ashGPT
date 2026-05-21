@@ -219,12 +219,13 @@ def reciprocal_rank_fusion(
 # ── Cached per-namespace indexes ──────────────────────────────────────────────
 
 
-BM25Source = Callable[[str | None], list[tuple[str, str, dict]]]
+BM25Source = Callable[..., list[tuple[str, str, dict]]]
 """Function returning ``[(id, content, metadata), ...]`` for a namespace.
 
 When called with ``None`` it returns the shared/legacy collection (no
 namespace filtering). When called with a user_id it returns only that user's
-chunks. The source is responsible for any database/vector-store I/O.
+chunks. Newer sources may accept ``where=...`` so scoped project/folder/file
+indexes can avoid enumerating the whole namespace before filtering.
 """
 
 
@@ -252,7 +253,10 @@ def get_bm25_index(
         log.warning("BM25 source not configured; returning empty index")
         idx = BM25Index([])
     else:
-        rows = _source(namespace)
+        try:
+            rows = _source(namespace, where=where)
+        except TypeError:
+            rows = _source(namespace)
         if where:
             rows = [(doc_id, content, meta) for doc_id, content, meta in rows if _meta_match(meta, where)]
         idx = BM25Index(rows)

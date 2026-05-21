@@ -70,12 +70,14 @@ class VectorStore(Protocol):
 
     def delete_namespace(self, namespace: str) -> None: ...
 
-    def list_namespace(self, namespace: str) -> list[VectorItem]:
+    def list_namespace(
+        self, namespace: str, where: dict[str, Any] | None = None
+    ) -> list[VectorItem]:
         """Enumerate every item in ``namespace``.
 
-        Used by the BM25 corpus builder, which needs lexical access to every
-        chunk a user has indexed. Vector fields may be returned empty since
-        BM25 only consumes ``content`` + ``metadata``.
+        Used by the BM25 corpus builder, which needs lexical access to chunks
+        in a namespace or selected scope. Vector fields may be returned empty
+        since BM25 only consumes ``content`` + ``metadata``.
         """
         ...
 
@@ -254,12 +256,17 @@ class PgVectorStore:
                 {"ns": namespace},
             )
 
-    def list_namespace(self, namespace: str) -> list[VectorItem]:
+    def list_namespace(
+        self, namespace: str, where: dict[str, Any] | None = None
+    ) -> list[VectorItem]:
         from sqlalchemy import text
 
-        sql = f"SELECT id, content, metadata FROM {self._table} WHERE namespace = :ns"
+        meta_clauses, params = _build_meta_where(where or {})
+        params["ns"] = namespace
+        meta_sql = (" AND " + " AND ".join(meta_clauses)) if meta_clauses else ""
+        sql = f"SELECT id, content, metadata FROM {self._table} WHERE namespace = :ns{meta_sql}"
         with self._engine.begin() as conn:
-            rows = conn.execute(text(sql), {"ns": namespace}).all()
+            rows = conn.execute(text(sql), params).all()
         return [
             VectorItem(
                 id=r[0],
@@ -398,7 +405,9 @@ class CloudflareVectorize:
         )
         r.raise_for_status()
 
-    def list_namespace(self, namespace: str) -> list[VectorItem]:
+    def list_namespace(
+        self, namespace: str, where: dict[str, Any] | None = None
+    ) -> list[VectorItem]:
         raise NotImplementedError(
             "vectorize: enumeration not supported; BM25 corpus requires "
             "pgvector or chroma backends"
@@ -450,7 +459,9 @@ class InMemoryVectorStore:
         for k in [k for k, v in self._items.items() if v.namespace == namespace]:
             del self._items[k]
 
-    def list_namespace(self, namespace: str) -> list[VectorItem]:
+    def list_namespace(
+        self, namespace: str, where: dict[str, Any] | None = None
+    ) -> list[VectorItem]:
         return [
             VectorItem(
                 id=it.id,
@@ -461,6 +472,7 @@ class InMemoryVectorStore:
             )
             for it in self._items.values()
             if it.namespace == namespace
+            and (not where or _match_where(it.metadata, where))
         ]
 
 

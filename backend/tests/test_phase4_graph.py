@@ -79,11 +79,61 @@ class TestRouteFunction:
         state: AgentState = {"query": "test"}
         assert _route_after_retrieval(state) == "general"
 
+    def test_route_empty_scope_short_circuits(self) -> None:
+        from src.agent.graph import _route_after_cache_check
+
+        state: AgentState = {"query": "test", "no_material_reason": "no material"}
+        assert _route_after_cache_check(state) == "no_material"
+
+    def test_chronology_only_skips_synthesis(self) -> None:
+        from src.agent.graph import _route_after_chronology
+
+        assert _route_after_chronology({"query": "test", "intent": "chronology"}) == "complete"
+        assert _route_after_chronology({"query": "test", "intent": "summary"}) == "synthesis"
+
 
 # ── Integration tests: verify correct node paths ─────────────────────────────
 
 
 class TestEndToEndRouting:
+    def test_chronology_graph_skips_synthesis_with_mocked_nodes(self) -> None:
+        """Chronology-only graph path should not pay for the synthesis node."""
+        from src.agent import graph as graph_mod
+
+        def fake_router(state):
+            return {"intent": "chronology", "node_trace": ["router"]}
+
+        def fake_retrieval(state):
+            return {"retrieved_texts": [], "retrieved_slides": [], "node_trace": state["node_trace"] + ["retrieval"]}
+
+        def fake_cache_check(state):
+            return {"cache_hit": False, "node_trace": state["node_trace"] + ["cache_check"]}
+
+        def fake_chronology(state):
+            return {
+                "mermaid_diagram": "graph TD\n  a[\"Start\"]",
+                "final_answer": "```mermaid\ngraph TD\n  a[\"Start\"]\n```",
+                "node_trace": state["node_trace"] + ["chronology"],
+            }
+
+        def fail_synthesis(state):
+            raise AssertionError("chronology-only path should skip synthesis")
+
+        def fake_verification(state):
+            return {"verification_report": {"all_supported": True}, "node_trace": state["node_trace"] + ["verification"]}
+
+        with patch.object(graph_mod, "router_node", side_effect=fake_router), \
+            patch.object(graph_mod, "retrieval_node", side_effect=fake_retrieval), \
+            patch.object(graph_mod, "cache_check_node", side_effect=fake_cache_check), \
+            patch.object(graph_mod, "chronology_node", side_effect=fake_chronology), \
+            patch.object(graph_mod, "synthesis_node", side_effect=fail_synthesis), \
+            patch.object(graph_mod, "verification_node", side_effect=fake_verification):
+            graph = graph_mod.build_graph()
+            result = graph.invoke({"query": "timeline please"})
+
+        assert result["node_trace"] == ["router", "retrieval", "cache_check", "chronology", "verification"]
+        assert result["final_answer"].startswith("```mermaid")
+
     @pytest.mark.integration
     @pytest.mark.slow
     def test_ratio_path(self) -> None:
@@ -104,13 +154,13 @@ class TestEndToEndRouting:
     @pytest.mark.integration
     @pytest.mark.slow
     def test_chronology_path(self) -> None:
-        """Chronology intent: router → retrieval → chronology → synthesis (→ verification)."""
+        """Chronology intent: router → retrieval → chronology (→ verification)."""
         from src.agent.graph import run_query
         from src.config import USE_VERIFICATION
 
         result = run_query("Show me the timeline of events for week 3 readings")
         assert result["intent"] == "chronology"
-        expected = ["router", "retrieval", "chronology", "synthesis"]
+        expected = ["router", "retrieval", "chronology"]
         if USE_VERIFICATION:
             expected.append("verification")
         assert result["node_trace"] == expected

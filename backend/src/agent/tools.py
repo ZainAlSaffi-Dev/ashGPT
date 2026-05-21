@@ -159,7 +159,9 @@ def _doc_id(content: str, source: str) -> str:
 _bm25_initialised = False
 
 
-def _bm25_source(namespace: str | None) -> list[tuple[str, str, dict]]:
+def _bm25_source(
+    namespace: str | None, where: dict | None = None
+) -> list[tuple[str, str, dict]]:
     """Pull every chunk for ``namespace`` from the configured store → BM25 rows.
 
     Goes through the ``VectorStore.list_namespace`` adapter so the BM25
@@ -167,7 +169,7 @@ def _bm25_source(namespace: str | None) -> list[tuple[str, str, dict]]:
     chroma in local dev).
     """
     try:
-        items = _get_store().list_namespace(namespace or "")
+        items = _get_store().list_namespace(namespace or "", where=where or None)
     except NotImplementedError:
         log.warning("vector store does not support enumeration; BM25 corpus empty")
         return []

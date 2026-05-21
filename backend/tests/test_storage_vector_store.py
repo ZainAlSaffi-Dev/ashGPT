@@ -93,6 +93,7 @@ def test_inmemory_project_file_filters_and_metadata_update():
     assert [h.id for h in hits] == ["a"]
     hits = store.search(_embed("x"), namespace="u", k=5, where={"file_id": {"$in": ["f2"]}})
     assert [h.id for h in hits] == ["b"]
+    assert [it.id for it in store.list_namespace("u", where={"project_id": "p1"})] == ["a"]
 
     store.update_metadata(["a"], namespace="u", patch={"folder_id": "new"})
     assert store.search(_embed("x"), namespace="u", k=5, where={"folder_id": "old"}) == []

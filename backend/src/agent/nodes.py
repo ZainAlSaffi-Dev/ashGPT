@@ -298,6 +298,11 @@ def retrieval_node(state: AgentState) -> dict:
         "node_trace": _append_trace(state, "retrieval"),
         "_timing_sub": sub_timings or None,
     }
+    if out["no_material_reason"]:
+        out["final_answer"] = (
+            "I could not find any indexed material in the selected workspace or subject yet. "
+            "Upload or move relevant notes into this scope, then ask again."
+        )
     if rewritten_query:
         out["rewritten_query"] = rewritten_query
     return out
@@ -477,6 +482,10 @@ CHRONOLOGY_SYSTEM = (
     "- Wrap ALL labels in double quotes.\n"
     "- Do NOT use the keyword `end` as a node ID.\n"
     "- Aim for 5-12 nodes total. Fewer is better — each node is one key event.\n\n"
+    "CITATIONS:\n"
+    "- In the plain-English summary after the diagram, cite factual claims with "
+    "the provided [S#] source labels.\n"
+    "- Mermaid labels should stay short; do not put [S#] tokens inside Mermaid nodes.\n\n"
     "Example of a GOOD diagram:\n"
     "```\n"
     "graph TD\n"
@@ -546,9 +555,16 @@ def chronology_node(state: AgentState) -> dict:
     if not mermaid_diagram:
         log.warning("ChronologyNode: no Mermaid block found in LLM response")
 
+    final_answer = response.strip()
+    if mermaid_diagram and "```mermaid" not in final_answer:
+        final_answer = f"```mermaid\n{mermaid_diagram}\n```"
+        if chronology_summary:
+            final_answer += f"\n\n**Timeline Summary:**\n{chronology_summary}"
+
     return {
         "mermaid_diagram": mermaid_diagram,
         "chronology_summary": chronology_summary,
+        "final_answer": final_answer,
         "node_trace": _append_trace(state, "chronology"),
     }
 
