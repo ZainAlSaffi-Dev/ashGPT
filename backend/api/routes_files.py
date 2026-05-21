@@ -162,6 +162,15 @@ async def process_upload(
         return ProcessResponse(
             file_id=row.id, status=row.status, chunk_count=row.chunk_count, job_id=job.id if job else None
         )
+    if row.status == "processing":
+        job = (
+            await db.execute(
+                select(IngestionJob).where(IngestionJob.file_id == row.id, IngestionJob.user_id == user.id)
+            )
+        ).scalar_one_or_none()
+        return ProcessResponse(
+            file_id=row.id, status=row.status, chunk_count=row.chunk_count, job_id=job.id if job else None
+        )
 
     blob = make_blob_store()
     # R2 is strongly consistent for new-object reads, but we have observed
@@ -201,6 +210,7 @@ async def process_upload(
         raise HTTPException(409, row.error)
 
     row.status = "processing"
+    row.error = None
     job = (
         await db.execute(
             select(IngestionJob).where(IngestionJob.file_id == row.id, IngestionJob.user_id == user.id)
@@ -292,19 +302,25 @@ async def update_file(
     if row is None:
         raise HTTPException(404, "file not found")
 
-    next_project_id = body.project_id if body.project_id is not None else row.project_id
-    next_folder_id = body.folder_id if body.folder_id is not None else row.folder_id
+    fields_set = body.model_fields_set
+    next_project_id = body.project_id if "project_id" in fields_set else row.project_id
+    if "folder_id" in fields_set:
+        next_folder_id = body.folder_id
+    elif "project_id" in fields_set:
+        next_folder_id = None
+    else:
+        next_folder_id = row.folder_id
     await _validate_scope(db, user, next_project_id, next_folder_id)
 
-    if body.name is not None:
+    if "name" in fields_set and body.name is not None:
         row.name = body.name
-    if body.project_id is not None:
+    if "project_id" in fields_set:
         row.project_id = body.project_id
-    if body.folder_id is not None:
+    if "folder_id" in fields_set or "project_id" in fields_set:
         row.folder_id = body.folder_id
-    if body.doc_type is not None:
+    if "doc_type" in fields_set and body.doc_type is not None:
         row.doc_type = body.doc_type
-    if body.week is not None:
+    if "week" in fields_set:
         row.week = body.week
     await db.execute(
         ChunkMeta.__table__.update()
@@ -329,10 +345,10 @@ async def update_file(
                     "file_name": row.name,
                 },
             )
-        except NotImplementedError:
-            log.warning("vector metadata update unavailable for file %s", file_id)
+        except NotImplementedError as e:
+            raise HTTPException(501, "vector metadata update unavailable") from e
         except Exception as e:  # pragma: no cover
-            log.warning("vector metadata update failed for file %s: %s", file_id, e)
+            raise HTTPException(500, "vector metadata update failed") from e
     try:
         from src.agent import bm25
 
@@ -356,7 +372,7 @@ async def delete_file(
     if row is None:
         raise HTTPException(404, "file not found")
 
-    # Best-effort: drop vectors first, then blob, then DB row (cascades chunks).
+    # Drop vectors before DB rows so deleted chunks cannot remain retrievable.
     try:
         from src.storage.vector_store import make_vector_store
 
@@ -367,7 +383,7 @@ async def delete_file(
         if chunk_ids:
             vs.delete(chunk_ids, namespace=user.id)
     except Exception as e:  # pragma: no cover
-        log.warning("vector cleanup failed for file %s: %s", file_id, e)
+        raise HTTPException(500, "vector cleanup failed") from e
 
     try:
         blob = make_blob_store()
@@ -377,3 +393,11 @@ async def delete_file(
 
     await db.delete(row)
     await db.commit()
+    try:
+        from src.agent import bm25
+        from src.agent.cache import invalidate_user
+
+        bm25.invalidate(user.id)
+        await invalidate_user(user.id)
+    except Exception:  # pragma: no cover
+        log.warning("retrieval cache invalidation failed for file delete %s", file_id)

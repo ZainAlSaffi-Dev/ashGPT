@@ -33,7 +33,7 @@ class RetrievalScope:
             return cls()
         scope_type = scope.get("type") or "all"
         if scope_type not in {"all", "project", "folder", "files", "week", "doc_type"}:
-            scope_type = "all"
+            scope_type = "files"
         file_ids = tuple(fid for fid in (scope.get("file_ids") or []) if fid)
         doc_types = tuple(dt for dt in (scope.get("doc_types") or []) if dt)
         return cls(
@@ -47,7 +47,19 @@ class RetrievalScope:
         )
 
     def is_explicit_empty(self) -> bool:
-        return self.explicit and self.type == "files" and not self.file_ids
+        if not self.explicit or self.type == "all":
+            return False
+        if self.type == "project":
+            return not self.project_id
+        if self.type == "folder":
+            return not self.folder_id
+        if self.type == "files":
+            return not self.file_ids
+        if self.type == "week":
+            return not self.week
+        if self.type == "doc_type":
+            return not self.doc_types
+        return True
 
     def metadata_filter(self) -> dict[str, Any]:
         where: dict[str, Any] = {}

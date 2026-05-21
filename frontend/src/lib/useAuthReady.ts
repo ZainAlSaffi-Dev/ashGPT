@@ -3,6 +3,15 @@
 import { useAuth } from '@clerk/nextjs';
 import { useEffect, useRef, useState } from 'react';
 
+const TOKEN_ATTEMPT_TIMEOUT_MS = 1_000;
+
+async function getTokenWithTimeout(getToken: () => Promise<string | null>): Promise<string | null> {
+  return Promise.race([
+    getToken().catch(() => null),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), TOKEN_ATTEMPT_TIMEOUT_MS)),
+  ]);
+}
+
 /**
  * Returns true only once Clerk has loaded AND the in-memory session token
  * has been resolved at least once. The bug we're guarding against:
@@ -45,7 +54,7 @@ export function useAuthReady(): boolean {
       // Poll up to ~3s for the first non-null token. Each getToken() awaits
       // Clerk's internal state machine; we don't trust a single null read.
       for (let i = 0; i < 12 && !cancelled; i++) {
-        const t = await getToken().catch(() => null);
+        const t = await getTokenWithTimeout(getToken);
         if (t) {
           resolved.current = true;
           setReady(true);

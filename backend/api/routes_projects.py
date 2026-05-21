@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.storage.db import File as FileRow
+from src.storage.db import ChunkMeta, File as FileRow
 from src.storage.db import Folder, Project, User, _utcnow
 
 from .deps import current_user, db_session
@@ -84,6 +84,25 @@ async def _unique_slug(db: AsyncSession, user: User, name: str, exclude_id: str 
             return slug
         slug = f"{base}-{i}"
         i += 1
+
+
+async def _descendant_folder_ids(db: AsyncSession, user: User, folder_id: str) -> list[str]:
+    descendants: list[str] = []
+    frontier = [folder_id]
+    while frontier:
+        child_ids = (
+            await db.execute(
+                select(Folder.id).where(
+                    Folder.user_id == user.id,
+                    Folder.parent_id.in_(frontier),
+                )
+            )
+        ).scalars().all()
+        if not child_ids:
+            break
+        descendants.extend(child_ids)
+        frontier = list(child_ids)
+    return descendants
 
 
 @router.get("/projects", response_model=list[ProjectOut])
@@ -210,11 +229,17 @@ async def update_folder(
     folder = await _require_folder(db, user, folder_id)
     if body.name is not None:
         folder.name = body.name
-    if body.parent_id is not None:
-        if body.parent_id == folder.id:
+    if "parent_id" in body.model_fields_set:
+        if body.parent_id is None:
+            folder.parent_id = None
+        elif body.parent_id == folder.id:
             raise HTTPException(400, "folder cannot be its own parent")
-        await _require_folder(db, user, body.parent_id, project_id=folder.project_id)
-        folder.parent_id = body.parent_id
+        else:
+            descendants = await _descendant_folder_ids(db, user, folder.id)
+            if body.parent_id in descendants:
+                raise HTTPException(400, "folder cannot be moved inside its descendants")
+            await _require_folder(db, user, body.parent_id, project_id=folder.project_id)
+            folder.parent_id = body.parent_id
     if body.sort_order is not None:
         folder.sort_order = body.sort_order
     await db.commit()
@@ -243,10 +268,59 @@ async def delete_folder(
     if (child_count or file_count) and not recursive:
         raise HTTPException(409, "folder is not empty")
     if recursive:
+        folder_ids = [folder.id, *await _descendant_folder_ids(db, user, folder.id)]
+        affected_file_ids = (
+            await db.execute(
+                select(FileRow.id).where(
+                    FileRow.user_id == user.id,
+                    FileRow.folder_id.in_(folder_ids),
+                )
+            )
+        ).scalars().all()
+        if affected_file_ids:
+            chunk_ids = (
+                await db.execute(
+                    select(ChunkMeta.id).where(
+                        ChunkMeta.user_id == user.id,
+                        ChunkMeta.file_id.in_(affected_file_ids),
+                    )
+                )
+            ).scalars().all()
+            await db.execute(
+                ChunkMeta.__table__.update()
+                .where(
+                    ChunkMeta.user_id == user.id,
+                    ChunkMeta.file_id.in_(affected_file_ids),
+                )
+                .values(folder_id=None)
+            )
+            if chunk_ids:
+                try:
+                    from src.storage.vector_store import make_vector_store
+
+                    make_vector_store().update_metadata(
+                        chunk_ids,
+                        namespace=user.id,
+                        patch={"folder_id": None},
+                    )
+                except Exception as e:  # pragma: no cover
+                    raise HTTPException(500, "vector metadata update failed") from e
         await db.execute(
             FileRow.__table__.update()
-            .where(FileRow.user_id == user.id, FileRow.folder_id == folder.id)
+            .where(FileRow.user_id == user.id, FileRow.folder_id.in_(folder_ids))
             .values(folder_id=None)
         )
+        for descendant_id in reversed(folder_ids[1:]):
+            child = await _require_folder(db, user, descendant_id)
+            await db.delete(child)
     await db.delete(folder)
     await db.commit()
+    if recursive:
+        try:
+            from src.agent import bm25
+            from src.agent.cache import invalidate_user
+
+            bm25.invalidate(user.id)
+            await invalidate_user(user.id)
+        except Exception:  # pragma: no cover
+            pass

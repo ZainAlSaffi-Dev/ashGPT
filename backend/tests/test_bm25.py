@@ -203,6 +203,37 @@ def test_invalidate_rebuilds_index():
     assert len(get_bm25_index("u")) == 2
 
 
+def test_scoped_indexes_cache_independently_and_invalidate_by_namespace():
+    rows = [
+        ("p1", "project one estoppel", {"project_id": "p1"}),
+        ("p2", "project two estoppel", {"project_id": "p2"}),
+    ]
+
+    configure_bm25_source(lambda _ns: rows)
+    invalidate()
+    idx_p1 = get_bm25_index(
+        "u",
+        scope_hash="scope_p1",
+        where={"project_id": "p1"},
+    )
+    idx_p2 = get_bm25_index(
+        "u",
+        scope_hash="scope_p2",
+        where={"project_id": "p2"},
+    )
+
+    assert idx_p1 is get_bm25_index("u", scope_hash="scope_p1", where={"project_id": "p1"})
+    assert idx_p1 is not idx_p2
+    assert [h[0] for h in idx_p1.search("estoppel", k=2)] == ["p1"]
+    assert [h[0] for h in idx_p2.search("estoppel", k=2)] == ["p2"]
+
+    rows.append(("p3", "project three estoppel", {"project_id": "p1"}))
+    invalidate("u")
+    rebuilt_p1 = get_bm25_index("u", scope_hash="scope_p1", where={"project_id": "p1"})
+    assert rebuilt_p1 is not idx_p1
+    assert [h[0] for h in rebuilt_p1.search("estoppel", k=3)] == ["p1", "p3"]
+
+
 def test_doc_id_alignment_after_round_trip():
     """End-to-end ranking example with realistic legal text."""
     corpus = [

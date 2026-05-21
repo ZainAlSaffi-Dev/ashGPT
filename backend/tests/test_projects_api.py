@@ -102,3 +102,69 @@ async def test_non_empty_folder_delete_requires_recursive(client):
     assert r.status_code == 200
     [moved] = [f for f in r.json() if f["id"] == file_row["file_id"]]
     assert moved["folder_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_recursive_folder_delete_clears_descendant_file_and_chunk_scope(client):
+    from src.storage import db as db_mod
+    from src.storage.db import ChunkMeta
+
+    project = (
+        await client.post("/projects", json={"name": "Trusts"}, headers=auth())
+    ).json()
+    parent = (
+        await client.post(
+            f"/projects/{project['id']}/folders",
+            json={"name": "Module"},
+            headers=auth(),
+        )
+    ).json()
+    child = (
+        await client.post(
+            f"/projects/{project['id']}/folders",
+            json={"name": "Cases", "parent_id": parent["id"]},
+            headers=auth(),
+        )
+    ).json()
+    file_row = (
+        await client.post(
+            "/uploads/presign",
+            json={
+                "name": "trusts.pdf",
+                "mime": "application/pdf",
+                "project_id": project["id"],
+                "folder_id": child["id"],
+            },
+            headers=auth(),
+        )
+    ).json()
+    async with db_mod.get_session(db_mod.get_engine()) as session:
+        from src.storage.db import File as FileRow
+
+        stored_file = await session.get(FileRow, file_row["file_id"])
+        assert stored_file is not None
+        session.add(
+            ChunkMeta(
+                id="chunk_descendant",
+                file_id=file_row["file_id"],
+                user_id=stored_file.user_id,
+                project_id=project["id"],
+                folder_id=child["id"],
+                content="trusts content",
+                source="trusts.pdf",
+            )
+        )
+        await session.commit()
+
+    r = await client.delete(f"/folders/{parent['id']}?recursive=true", headers=auth())
+    assert r.status_code == 204, r.text
+
+    r = await client.get(f"/files?project_id={project['id']}", headers=auth())
+    assert r.status_code == 200
+    [moved] = [f for f in r.json() if f["id"] == file_row["file_id"]]
+    assert moved["folder_id"] is None
+
+    async with db_mod.get_session(db_mod.get_engine()) as session:
+        chunk = await session.get(ChunkMeta, "chunk_descendant")
+        assert chunk is not None
+        assert chunk.folder_id is None

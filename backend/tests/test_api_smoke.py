@@ -150,3 +150,25 @@ async def test_chat_streams_events(client):
     assert "answer_chunk" in text
     assert "adverse possession" in text.lower() or "title via long" in text
     assert "\"intent\": \"general\"" in text or "intent" in text
+
+
+@pytest.mark.asyncio
+async def test_explicit_scope_on_legacy_session_is_rejected(client):
+    session = (
+        await client.post("/sessions", json={"title": "Legacy"}, headers=_auth_headers())
+    ).json()
+    project = (
+        await client.post("/projects", json={"name": "Contracts"}, headers=_auth_headers())
+    ).json()
+
+    r = await client.post(
+        "/chat",
+        json={
+            "query": "Only this project",
+            "session_id": session["id"],
+            "scope": {"type": "project", "project_id": project["id"]},
+        },
+        headers=_auth_headers(),
+    )
+
+    assert r.status_code == 409

@@ -136,7 +136,7 @@ When the user opens an old chat, `frontend/src/app/(app)/chat/[sessionId]/page.t
 
 ## Deploy
 
-**CI** (`.github/workflows/deploy.yml`): on push to `main` it runs `@cloudflare/next-on-pages` then `wrangler pages deploy .vercel/output/static --project-name=ashgpt --branch=main`, then deploys the worker. Required GH secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `NEXT_PUBLIC_API_BASE` (= `https://api.ashgpt.xyz`).
+**CI** (`.github/workflows/deploy.yml`): on push to `main` it runs `@cloudflare/next-on-pages` then `wrangler pages deploy .vercel/output/static --project-name=ashgpt --branch=main`, then deploys the worker. Required GH secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `NEXT_PUBLIC_API_BASE` (= `https://api.ashgpt.xyz`). Worker routes/custom domains are dashboard-managed, not `wrangler.toml`-managed, so CI does not need zone route permissions.
 
 **Pages dashboard build config** (also valid for manual setup):
 - Root dir: `frontend`
@@ -171,6 +171,7 @@ Public-build vars (`NEXT_PUBLIC_*`) live in `frontend/wrangler.toml`'s `[vars]` 
 - `NEXT_PUBLIC_CLERK_PROXY_URL` → `https://ashgpt.xyz/__clerk/` (wrangler.toml). Clerk production domain is configured to use this proxy URL; browser Clerk traffic should stay same-origin through `ashgpt.xyz/__clerk`.
 - `CLERK_SECRET_KEY` → **secret** `sk_live_…` (Pages dashboard → encrypted env vars, **not** in wrangler.toml)
 - `NODE_VERSION` → `20` (dashboard)
+- Pages deploys must use `wrangler pages deploy .vercel/output/static` (or the GitHub Action). Running plain `wrangler deploy` from `frontend/` is a Worker deploy and fails with "Missing entry-point to Worker script or to assets directory"; do not "fix" that by adding `main` or `[assets]` to the Pages config.
 
 ### Worker (`lawgpt-edge`, `infra/wrangler.toml`)
 
@@ -209,6 +210,7 @@ Backend container picks up the same `[vars]` block as the worker (single `infra/
 8. **Chat streams can outlive route state** — always pass an `AbortSignal` into `/chat` streaming and abort on unmount/session switch. A first-message stream that completes after the user leaves `/chat` can otherwise `router.replace` them back to `/chat/<id>`.
 9. **No `keepPreviousData` for per-session messages** — it can briefly render chat A's turns under chat B's URL during rapid session switching. Seed/cache only the exact `['messages', sessionId]` key.
 10. **Protected-route sign-in redirects must stay same-origin** — unauthenticated document navigations to `/chat` routes should redirect to `/?redirect_url=...`, not Clerk's account portal host. The landing page sanitizes that value before handing it to Clerk modal buttons.
+11. **Landing redirect must not wait on `getToken()`** — after modal sign-in, navigate as soon as Clerk reports `isSignedIn`; token readiness is handled by authed query gates. Waiting for a token on `/` can leave the user on the spinner until manual refresh.
 
 ## Backend gotchas
 
@@ -216,7 +218,7 @@ Backend container picks up the same `[vars]` block as the worker (single `infra/
 2. **Secrets** never go into Codex at all. No API keys, tokens, passwords, connection strings in chat or in code committed to the repo.
 3. **Conversation memory is not source evidence.** `conversation_memory` is rebuilt per session from older persisted turns and may resolve shorthand, jurisdiction, goals, corrections, and authorities already discussed, but answer facts still need retrieved `[S#]` citations or `[external]`.
 4. **Scoped retrieval is two-legged.** Project/folder/file scope must be applied to both pgvector metadata filters and BM25 cache/search. BM25 cache keys are now `user_id:scope_hash`; invalidating a user must clear all keys with that prefix.
-5. **Worker route deploys need zone route permissions.** Because `infra/wrangler.toml` manages `ashgpt.xyz/__clerk` Worker routes, the GitHub `CLOUDFLARE_API_TOKEN` needs zone-level `Workers Routes: Edit/Write` for `ashgpt.xyz` plus `Zone: Read`; Worker/Pages edit permissions alone will fail route updates with Cloudflare code 10000.
+5. **Worker routes are dashboard-managed.** `infra/wrangler.toml` intentionally does not declare `ashgpt.xyz/__clerk` routes; otherwise GitHub Actions needs zone-level `Workers Routes: Edit/Write` for `ashgpt.xyz` plus `Zone: Read` and fails with Cloudflare code 10000 when the token is account-only.
 
 ---
 
@@ -259,6 +261,7 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - In-chat memory v1: backend now keeps the latest 24 messages verbatim, compresses older persisted turns into per-session `conversation_memory`, feeds that into router/retrieval/synthesis with explicit grounding boundaries, and emits `memory` SSE telemetry when compression occurs.
 - Project-scoped library design: added `docs/project_scoped_library_system_design.md` mapping current user/session/upload persistence and the target project/folder retrieval architecture.
 - Project-scoped library v1: added project/folder persistence and CRUD, scoped file upload/list/move, scoped sessions/messages/chat snapshots, project/folder/file retrieval filters across dense + BM25, source metadata rehydration, and a basic frontend subject/folder library selector with scoped upload/chat plumbing.
+- Project-scoped library hardening: fixed landing post-login navigation, scoped cache invalidation, legacy-session scope mismatch rejection, recursive folder scope cleanup, delete cache invalidation, and removed CI-owned Cloudflare routes so main deploys can proceed with account-level tokens.
 
 ---
 

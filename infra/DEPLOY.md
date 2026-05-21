@@ -56,6 +56,14 @@ Repo secrets to add:
 - `CLOUDFLARE_API_TOKEN` (Account + Workers + Pages + D1 + R2 + Vectorize edit)
 - `CLOUDFLARE_ACCOUNT_ID`
 
+Worker routes/custom domains are created once in the Cloudflare dashboard and
+are not managed by CI. If `wrangler.toml` is changed to manage routes again,
+also grant the token `Zone: Read` and `Workers Routes: Edit` for `ashgpt.xyz`.
+
+Frontend deploys must use `wrangler pages deploy .vercel/output/static`.
+Plain `wrangler deploy` is for Workers, not Pages; from `frontend/` it fails
+with "Missing entry-point to Worker script or to assets directory".
+
 Workflows:
 
 - `.github/workflows/ci.yml` — runs backend pytest, frontend vitest + tsc, Worker tsc on every push and PR.

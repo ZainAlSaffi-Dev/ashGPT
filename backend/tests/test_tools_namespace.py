@@ -69,3 +69,11 @@ def test_project_folder_file_scope_filters_combine_with_namespace():
 def test_explicit_empty_files_scope_is_not_all_library():
     scope = RetrievalScope(type="files", file_ids=(), explicit=True)
     assert scope.is_explicit_empty()
+
+
+def test_missing_required_explicit_scope_is_not_all_library():
+    assert RetrievalScope.from_input({"type": "project"}).is_explicit_empty()
+    assert RetrievalScope.from_input({"type": "folder"}).is_explicit_empty()
+    assert RetrievalScope.from_input({"type": "week"}).is_explicit_empty()
+    assert RetrievalScope.from_input({"type": "doc_type", "doc_types": []}).is_explicit_empty()
+    assert RetrievalScope.from_input({"type": "bogus"}).is_explicit_empty()

@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { FileStack, FolderPlus, Plus, Trash2 } from 'lucide-react';
 import { useAuth } from '@clerk/nextjs';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { useQueryClient } from '@tanstack/react-query';
 
 import { Dropzone } from '@/components/Dropzone';
 import { OnboardingChecklist } from '@/components/OnboardingChecklist';
@@ -23,8 +24,9 @@ import {
   useInvalidateFiles,
   useOnboarding,
   useProjects,
+  projectKeys,
 } from '@/lib/queries';
-import type { FileMeta } from '@/lib/types';
+import type { FileMeta, Folder, Project } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 function fileSlug(name: string): string {
@@ -34,6 +36,7 @@ function fileSlug(name: string): string {
 export default function LibraryPage() {
   const { getToken } = useAuth();
   const router = useRouter();
+  const queryClient = useQueryClient();
   const searchParams = useSearchParams();
   const selectedProjectId = searchParams.get('project');
   const selectedFolderId = searchParams.get('folder');
@@ -114,6 +117,9 @@ export default function LibraryPage() {
     try {
       const token = (await getToken()) ?? undefined;
       const project = await createProject({ name: newProjectName.trim() }, token);
+      queryClient.setQueryData<Project[]>(projectKeys.all, (old) =>
+        old ? [project, ...old.filter((p) => p.id !== project.id)] : [project],
+      );
       setNewProjectName('');
       setProject(project.id);
     } finally {
@@ -126,7 +132,10 @@ export default function LibraryPage() {
     setCreatingFolder(true);
     try {
       const token = (await getToken()) ?? undefined;
-      await createFolder(selectedProjectId, { name: newFolderName.trim() }, token);
+      const folder = await createFolder(selectedProjectId, { name: newFolderName.trim() }, token);
+      queryClient.setQueryData<Folder[]>(projectKeys.folders(selectedProjectId), (old) =>
+        old ? [...old.filter((f) => f.id !== folder.id), folder] : [folder],
+      );
       setNewFolderName('');
     } finally {
       setCreatingFolder(false);

@@ -6,6 +6,7 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
+  type QueryKey,
   type UseMutationOptions,
 } from '@tanstack/react-query';
 
@@ -64,7 +65,6 @@ export function useFolders(projectId: string | null | undefined, options: QueryG
     staleTime: 5 * 60_000,
     refetchOnWindowFocus: false,
     refetchOnMount: false,
-    placeholderData: keepPreviousData,
   });
 }
 
@@ -85,10 +85,7 @@ export function useFiles(scopeOrOptions: FileListScope | QueryGateOptions = {}, 
     // Fallback so an in-flight file that never reaches a terminal status
     // still gets revalidated on revisit, instead of polling forever.
     staleTime: 5 * 60_000,
-    // Tab nav must feel instant — keep cached files on screen and
-    // revalidate in the background instead of flashing the skeleton.
     refetchOnMount: false,
-    placeholderData: keepPreviousData,
     refetchInterval: (query) => {
       const data = query.state.data;
       if (!data || data.length === 0) return false;
@@ -112,7 +109,6 @@ export function useSessions(options: QueryGateOptions & { projectId?: string | n
     staleTime: 5 * 60_000,
     refetchOnWindowFocus: false,
     refetchOnMount: false,
-    placeholderData: keepPreviousData,
   });
 }
 
@@ -139,32 +135,38 @@ export function useMessages(sessionId: string | null | undefined) {
 /** Used by upload + delete to invalidate the shared file list cache. */
 export function useInvalidateFiles(scope: FileListScope = {}) {
   const qc = useQueryClient();
-  return () => qc.invalidateQueries({ queryKey: projectKeys.files(scope) });
+  void scope;
+  return () => qc.invalidateQueries({ queryKey: ['files'] });
 }
 
 /** Optimistic session delete: removes from the cached list immediately,
  *  rolls back if the API call fails. Sidebar uses this so the row
  *  disappears the moment the user confirms — no spinner lag. */
 export function useDeleteSession(
-  options?: Pick<UseMutationOptions<void, Error, string, { previous?: SessionSummary[] }>, 'onSuccess'>,
+  options?: Pick<
+    UseMutationOptions<
+      void,
+      Error,
+      string,
+      { previous?: Array<[QueryKey, SessionSummary[] | undefined]> }
+    >,
+    'onSuccess'
+  >,
 ) {
   const { getToken } = useAuth();
   const qc = useQueryClient();
-  return useMutation<void, Error, string, { previous?: SessionSummary[] }>({
+  return useMutation<void, Error, string, { previous?: Array<[QueryKey, SessionSummary[] | undefined]> }>({
     mutationFn: (id: string) => withAuth(getToken, (token) => deleteSession(id, token)),
     onMutate: async (id) => {
       await qc.cancelQueries({ queryKey: ['sessions'] });
-      const previous = qc.getQueryData<SessionSummary[]>(['sessions']);
-      if (previous) {
-        qc.setQueryData<SessionSummary[]>(
-          ['sessions'],
-          previous.filter((s) => s.id !== id),
-        );
-      }
+      const previous = qc.getQueriesData<SessionSummary[]>({ queryKey: ['sessions'] });
+      qc.setQueriesData<SessionSummary[]>({ queryKey: ['sessions'] }, (old) =>
+        old ? old.filter((s) => s.id !== id) : old,
+      );
       return { previous };
     },
     onError: (_err, _id, ctx) => {
-      if (ctx?.previous) qc.setQueryData(['sessions'], ctx.previous);
+      ctx?.previous?.forEach(([key, value]) => qc.setQueryData(key, value));
     },
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ['sessions'] });

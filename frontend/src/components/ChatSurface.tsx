@@ -10,7 +10,7 @@ import { ChatMessage } from '@/components/ChatMessage';
 import { OnboardingChecklist } from '@/components/OnboardingChecklist';
 import { SkeletonList } from '@/components/ui/Skeleton';
 import { turnsToCachedMessages, upsertCachedSession } from '@/lib/chat-cache';
-import { useOnboarding } from '@/lib/queries';
+import { projectKeys, useOnboarding } from '@/lib/queries';
 import { useChat, type ChatTurn } from '@/lib/useChat';
 import type { Message, RetrievalScope, SessionSummary } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -49,9 +49,15 @@ export function ChatSurface({
         ['messages', id],
         turnsToCachedMessages(committedTurns),
       );
-      queryClient.setQueriesData<SessionSummary[]>({ queryKey: ['sessions'] }, (sessions) =>
+      queryClient.setQueryData<SessionSummary[]>(projectKeys.sessions(null), (sessions) =>
         upsertCachedSession(sessions, id, committedTurns),
       );
+      if (scope && 'project_id' in scope && scope.project_id) {
+        queryClient.setQueryData<SessionSummary[]>(
+          projectKeys.sessions(scope.project_id),
+          (sessions) => upsertCachedSession(sessions, id, committedTurns),
+        );
+      }
     },
     onSessionCreated: (id) => {
       // First reply on the landing route — promote to the dynamic URL so

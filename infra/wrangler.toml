@@ -2,12 +2,14 @@ name = "lawgpt-edge"
 main = "worker/src/index.ts"
 compatibility_date = "2026-01-01"
 compatibility_flags = ["nodejs_compat"]
-workers_dev = true
+workers_dev = false
 
-routes = [
-  { pattern = "ashgpt.xyz/__clerk", zone_name = "ashgpt.xyz" },
-  { pattern = "ashgpt.xyz/__clerk/*", zone_name = "ashgpt.xyz" },
-]
+# Production routes/custom domains are dashboard-managed so CI can deploy with
+# account-level Worker permissions without also owning zone route mutations.
+# Required dashboard bindings:
+#   ashgpt.xyz/__clerk     -> lawgpt-edge
+#   ashgpt.xyz/__clerk/*   -> lawgpt-edge
+#   api.ashgpt.xyz         -> lawgpt-edge
 
 # Workers Logs: surface console.log/error from the Worker in the dashboard
 # (and `wrangler tail`). invocation_logs adds the request/response summary.

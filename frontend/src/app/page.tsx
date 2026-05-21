@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import type { Route } from 'next';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { SignInButton, SignUpButton, useAuth } from '@clerk/nextjs';
@@ -26,11 +27,25 @@ import { Button } from '@/components/ui/Button';
 export default function LandingPage() {
   const router = useRouter();
   const { isLoaded, isSignedIn } = useAuth();
-  const [authRedirectUrl, setAuthRedirectUrl] = useState('/chat');
+  const [authRedirectUrl, setAuthRedirectUrl] = useState<Route>('/chat' as Route);
+  const [isOpeningApp, setIsOpeningApp] = useState(false);
 
   useEffect(() => {
-    if (isLoaded && isSignedIn) router.replace('/chat');
-  }, [isLoaded, isSignedIn, router]);
+    if (!isLoaded || !isSignedIn) return;
+    let cancelled = false;
+    setIsOpeningApp(true);
+
+    router.replace(authRedirectUrl);
+    window.setTimeout(() => {
+      if (!cancelled && window.location.pathname === '/') {
+        window.location.replace(authRedirectUrl);
+      }
+    }, 700);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authRedirectUrl, isLoaded, isSignedIn, router]);
 
   useEffect(() => {
     const raw = new URLSearchParams(window.location.search).get('redirect_url');
@@ -38,7 +53,7 @@ export default function LandingPage() {
     try {
       const parsed = new URL(raw, window.location.origin);
       if (parsed.origin !== window.location.origin) return;
-      setAuthRedirectUrl(`${parsed.pathname}${parsed.search}${parsed.hash}` || '/chat');
+      setAuthRedirectUrl((`${parsed.pathname}${parsed.search}${parsed.hash}` || '/chat') as Route);
     } catch {
       // Ignore malformed redirect targets; the default /chat remains safe.
     }
@@ -66,7 +81,7 @@ export default function LandingPage() {
           Built for law students who want quick answers backed by their own readings.
         </p>
         <div className="mt-8 flex items-center justify-center gap-3">
-          {isLoaded && !isSignedIn && (
+          {isLoaded && !isSignedIn && !isOpeningApp && (
             <>
               <SignUpButton
                 mode="modal"
@@ -88,15 +103,17 @@ export default function LandingPage() {
           )}
           {isLoaded && isSignedIn && (
             <Button size="lg" asChild>
-              <Link href="/chat">Open the app</Link>
+              <Link href={authRedirectUrl}>Open the app</Link>
             </Button>
           )}
         </div>
         {/* While Clerk is hydrating (or while we're mid-redirect for a
             signed-in user) show a calm spinner instead of flashing the
             sign-in button. */}
-        {!isLoaded && (
-          <p className="mt-6 text-xs text-ink-soft">Loading…</p>
+        {(!isLoaded || isOpeningApp) && (
+          <p className="mt-6 text-xs text-ink-soft">
+            {isOpeningApp ? 'Opening your workspace…' : 'Loading…'}
+          </p>
         )}
       </motion.div>
     </main>

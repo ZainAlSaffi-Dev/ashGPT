@@ -37,6 +37,12 @@ def _sse(event: str, data: dict) -> dict:
     return {"event": event, "data": json.dumps(data)}
 
 
+def _scopes_match(existing: dict | None, requested: dict | None) -> bool:
+    if not existing and (not requested or requested == {"type": "all"}):
+        return True
+    return existing == requested
+
+
 async def _ensure_session(
     db: AsyncSession,
     user: User,
@@ -53,7 +59,7 @@ async def _ensure_session(
         ).scalar_one_or_none()
         if sess is None:
             raise HTTPException(404, "session not found")
-        if scope_snapshot and sess.scope and sess.scope != scope_snapshot:
+        if scope_snapshot and not _scopes_match(sess.scope, scope_snapshot):
             raise HTTPException(409, "session scope mismatch")
         return sess
     sess = Session(
