@@ -19,11 +19,16 @@ interface Props {
   onSelectSource?: (idx: number, anchor: CitationAnchor) => void;
 }
 
-function libraryHref(source: string | null): Route {
+function libraryHref(source: SourceHit): Route {
   // ``as Route`` is required because typedRoutes can't statically verify
   // a query-string built at runtime — the library route exists, we're
   // just appending a filter param the page reads via useSearchParams.
-  const q = source ? `?file=${encodeURIComponent(source)}` : '';
+  const params = new URLSearchParams();
+  if (source.project_id) params.set('project', source.project_id);
+  if (source.folder_id) params.set('folder', source.folder_id);
+  if (source.file_id) params.set('file_id', source.file_id);
+  else if (source.source) params.set('file', source.source);
+  const q = params.toString() ? `?${params.toString()}` : '';
   return (`/library${q}`) as Route;
 }
 
@@ -116,9 +121,9 @@ export function SourcePanel({ sources, highlightedIndex = null, onSelectSource }
                       </div>
                       <p className="line-clamp-3 text-ink-muted">{s.snippet}</p>
                     </button>
-                    {s.source && (
+                    {(s.file_id || s.source) && (
                       <Link
-                        href={libraryHref(s.source)}
+                        href={libraryHref(s)}
                         prefetch={false}
                         title="Open in library"
                         aria-label={`Open ${s.source} in library`}

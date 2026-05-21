@@ -61,6 +61,44 @@ class User(Base):
 
     files: Mapped[list["File"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     sessions: Mapped[list["Session"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    projects: Mapped[list["Project"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+
+
+class Project(Base):
+    __tablename__ = "projects"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    slug: Mapped[str] = mapped_column(String(255), index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    color: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    user: Mapped[User] = relationship(back_populates="projects")
+    folders: Mapped[list["Folder"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    files: Mapped[list["File"]] = relationship(back_populates="project")
+    sessions: Mapped[list["Session"]] = relationship(back_populates="project")
+
+
+class Folder(Base):
+    __tablename__ = "folders"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[str] = mapped_column(String(32), ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    parent_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("folders.id", ondelete="CASCADE"), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    project: Mapped[Project] = relationship(back_populates="folders")
+    parent: Mapped["Folder | None"] = relationship(remote_side="Folder.id", back_populates="children")
+    children: Mapped[list["Folder"]] = relationship(back_populates="parent", cascade="all, delete-orphan")
+    files: Mapped[list["File"]] = relationship(back_populates="folder")
 
 
 class File(Base):
@@ -72,6 +110,11 @@ class File(Base):
     mime: Mapped[str] = mapped_column(String(128))
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     blob_key: Mapped[str] = mapped_column(String(512))  # R2 object key or local relative path
+    project_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
+    folder_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("folders.id", ondelete="SET NULL"), nullable=True, index=True)
+    uploaded_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    last_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="uploaded")  # uploaded | processing | ready | failed
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     doc_type: Mapped[str] = mapped_column(String(32), default="note")  # note | past_paper | slide | reading
@@ -80,6 +123,8 @@ class File(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     user: Mapped[User] = relationship(back_populates="files")
+    project: Mapped[Project | None] = relationship(back_populates="files")
+    folder: Mapped[Folder | None] = relationship(back_populates="files")
     chunks: Mapped[list["ChunkMeta"]] = relationship(back_populates="file", cascade="all, delete-orphan")
 
 
@@ -91,6 +136,8 @@ class ChunkMeta(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     file_id: Mapped[str] = mapped_column(String(32), ForeignKey("files.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[str] = mapped_column(String(32), index=True)
+    project_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    folder_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     content: Mapped[str] = mapped_column(Text)
     page: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chunk_index: Mapped[int] = mapped_column(Integer, default=0)
@@ -108,11 +155,15 @@ class Session(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
+    folder_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("folders.id", ondelete="SET NULL"), nullable=True, index=True)
+    scope: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     title: Mapped[str] = mapped_column(String(255), default="New chat")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
     user: Mapped[User] = relationship(back_populates="sessions")
+    project: Mapped[Project | None] = relationship(back_populates="sessions")
     messages: Mapped[list["Message"]] = relationship(back_populates="session", cascade="all, delete-orphan")
 
 
@@ -124,6 +175,7 @@ class Message(Base):
     user_id: Mapped[str] = mapped_column(String(32), index=True)
     role: Mapped[str] = mapped_column(String(16))  # user | assistant
     content: Mapped[str] = mapped_column(Text)
+    scope: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     retrieved_chunk_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     # Full SourceHit list (source/doc_type/week/snippet) so reloaded
     # conversations can rehydrate the citation popovers without re-running
@@ -148,6 +200,7 @@ class Exam(Base):
     user_id: Mapped[str] = mapped_column(String(32), index=True)
     scope_type: Mapped[str] = mapped_column(String(32))  # file | week | all | past_paper
     scope_value: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    scope: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     num_mcq: Mapped[int] = mapped_column(Integer, default=0)
     num_short: Mapped[int] = mapped_column(Integer, default=0)
     difficulty: Mapped[str] = mapped_column(String(16), default="medium")
@@ -174,10 +227,25 @@ class AnswerCache(Base):
 
     cache_key: Mapped[str] = mapped_column(String(128), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(32), index=True)
+    scope_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     answer: Mapped[str] = mapped_column(Text)
     payload: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class IngestionJob(Base):
+    __tablename__ = "ingestion_jobs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    file_id: Mapped[str] = mapped_column(String(32), ForeignKey("files.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
 # ── Engine + session helpers ──────────────────────────────────────────────────
@@ -270,7 +338,27 @@ async def _apply_inline_migrations(conn) -> None:  # type: ignore[no-untyped-def
         "ALTER TABLE messages ADD COLUMN IF NOT EXISTS sources JSONB",
         "ALTER TABLE messages ADD COLUMN IF NOT EXISTS irac TEXT",
         "ALTER TABLE messages ADD COLUMN IF NOT EXISTS mermaid TEXT",
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS scope JSONB",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarded_at TIMESTAMPTZ",
+        "ALTER TABLE files ADD COLUMN IF NOT EXISTS project_id VARCHAR(32)",
+        "ALTER TABLE files ADD COLUMN IF NOT EXISTS folder_id VARCHAR(32)",
+        "ALTER TABLE files ADD COLUMN IF NOT EXISTS uploaded_by VARCHAR(32)",
+        "ALTER TABLE files ADD COLUMN IF NOT EXISTS content_hash VARCHAR(128)",
+        "ALTER TABLE files ADD COLUMN IF NOT EXISTS last_indexed_at TIMESTAMPTZ",
+        "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS project_id VARCHAR(32)",
+        "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS folder_id VARCHAR(32)",
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS project_id VARCHAR(32)",
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS folder_id VARCHAR(32)",
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS scope JSONB",
+        "ALTER TABLE answer_cache ADD COLUMN IF NOT EXISTS scope_hash VARCHAR(64)",
+        "ALTER TABLE exams ADD COLUMN IF NOT EXISTS scope JSONB",
+        "CREATE INDEX IF NOT EXISTS projects_user_archived_idx ON projects (user_id, archived_at)",
+        "CREATE INDEX IF NOT EXISTS projects_user_slug_idx ON projects (user_id, slug)",
+        "CREATE INDEX IF NOT EXISTS folders_user_project_idx ON folders (user_id, project_id)",
+        "CREATE INDEX IF NOT EXISTS files_user_scope_idx ON files (user_id, project_id, folder_id)",
+        "CREATE INDEX IF NOT EXISTS chunks_user_scope_idx ON chunks (user_id, project_id, folder_id)",
+        "CREATE INDEX IF NOT EXISTS sessions_user_project_idx ON sessions (user_id, project_id)",
+        "CREATE INDEX IF NOT EXISTS ingestion_jobs_user_file_idx ON ingestion_jobs (user_id, file_id)",
     )
     for stmt in statements:
         await conn.execute(text(stmt))

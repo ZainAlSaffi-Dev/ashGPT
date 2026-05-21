@@ -13,8 +13,12 @@ import type {
   ExamPayload,
   ExamResult,
   FileMeta,
+  FileListScope,
+  Folder,
   Message,
   PresignResponse,
+  Project,
+  RetrievalScope,
   SessionSummary,
 } from './types';
 
@@ -140,13 +144,38 @@ async function request<T>(
 
 // Sessions --------------------------------------------------------------------
 
-export const listSessions = (token?: string) =>
-  request<SessionSummary[]>('/sessions', { method: 'GET' }, token);
+function qs(params: Record<string, string | null | undefined>): string {
+  const out = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value) out.set(key, value);
+  }
+  const encoded = out.toString();
+  return encoded ? `?${encoded}` : '';
+}
 
-export const createSession = (title: string | null, token?: string) =>
+export const listSessions = (token?: string, options: { projectId?: string | null } = {}) =>
+  request<SessionSummary[]>(
+    `/sessions${qs({ project_id: options.projectId })}`,
+    { method: 'GET' },
+    token,
+  );
+
+export const createSession = (
+  title: string | null,
+  token?: string,
+  options: { projectId?: string | null; folderId?: string | null; scope?: RetrievalScope | null } = {},
+) =>
   request<SessionSummary>(
     '/sessions',
-    { method: 'POST', body: JSON.stringify({ title }) },
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        title,
+        project_id: options.projectId,
+        folder_id: options.folderId,
+        scope: options.scope,
+      }),
+    },
     token,
   );
 
@@ -158,11 +187,61 @@ export const deleteSession = (sessionId: string, token?: string) =>
 
 // Files -----------------------------------------------------------------------
 
-export const listFiles = (token?: string) =>
-  request<FileMeta[]>('/files', { method: 'GET' }, token);
+export const listProjects = (token?: string) =>
+  request<Project[]>('/projects', { method: 'GET' }, token);
+
+export const createProject = (body: { name: string; description?: string; color?: string }, token?: string) =>
+  request<Project>('/projects', { method: 'POST', body: JSON.stringify(body) }, token);
+
+export const updateProject = (
+  projectId: string,
+  body: { name?: string; description?: string; color?: string; archived?: boolean },
+  token?: string,
+) => request<Project>(`/projects/${projectId}`, { method: 'PATCH', body: JSON.stringify(body) }, token);
+
+export const listFolders = (projectId: string, token?: string) =>
+  request<Folder[]>(`/projects/${projectId}/folders`, { method: 'GET' }, token);
+
+export const createFolder = (
+  projectId: string,
+  body: { name: string; parent_id?: string | null; sort_order?: number },
+  token?: string,
+) =>
+  request<Folder>(
+    `/projects/${projectId}/folders`,
+    { method: 'POST', body: JSON.stringify(body) },
+    token,
+  );
+
+export const updateFolder = (
+  folderId: string,
+  body: { name?: string; parent_id?: string | null; sort_order?: number },
+  token?: string,
+) => request<Folder>(`/folders/${folderId}`, { method: 'PATCH', body: JSON.stringify(body) }, token);
+
+export const deleteFolder = (folderId: string, recursive = false, token?: string) =>
+  request<void>(`/folders/${folderId}${recursive ? '?recursive=true' : ''}`, { method: 'DELETE' }, token);
+
+export const listFiles = (token?: string, scope: FileListScope = {}) =>
+  request<FileMeta[]>(
+    `/files${qs({
+      project_id: scope.projectId,
+      folder_id: scope.folderId,
+      status: scope.status,
+    })}`,
+    { method: 'GET' },
+    token,
+  );
 
 export const presignUpload = (
-  body: { name: string; mime: string; doc_type?: string; week?: string | null },
+  body: {
+    name: string;
+    mime: string;
+    doc_type?: string;
+    week?: string | null;
+    project_id?: string | null;
+    folder_id?: string | null;
+  },
   token?: string,
 ) =>
   request<PresignResponse>(
@@ -203,7 +282,7 @@ export async function uploadBlob(
 }
 
 export const processUpload = (fileId: string, token?: string) =>
-  request<{ file_id: string; status: string; chunk_count: number }>(
+  request<{ file_id: string; status: string; chunk_count: number; job_id?: string | null }>(
     `/uploads/${fileId}/process`,
     { method: 'POST' },
     token,
@@ -211,6 +290,18 @@ export const processUpload = (fileId: string, token?: string) =>
 
 export const deleteFile = (fileId: string, token?: string) =>
   request<void>(`/files/${fileId}`, { method: 'DELETE' }, token);
+
+export const updateFile = (
+  fileId: string,
+  body: {
+    name?: string;
+    project_id?: string | null;
+    folder_id?: string | null;
+    doc_type?: string;
+    week?: string | null;
+  },
+  token?: string,
+) => request<FileMeta>(`/files/${fileId}`, { method: 'PATCH', body: JSON.stringify(body) }, token);
 
 // Exam (Phase 4 — endpoints stubbed until the agent wiring lands) ------------
 

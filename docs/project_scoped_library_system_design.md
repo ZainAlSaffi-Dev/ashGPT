@@ -348,6 +348,8 @@ Design fixes:
 
 ## Implementation Phases
 
+Implementation note (2026-05-21): v1 has shipped the core backend contract and a basic frontend scope selector. `project_id` / `folder_id` remain nullable for legacy rows. BM25 cache keys are now scoped as `user_id:scope_hash`, while vector namespace remains `user_id`. File moves update SQL file rows, chunk metadata, and pgvector/in-memory vector metadata; Cloudflare Vectorize would need a re-upsert path if it is used again.
+
 ### Phase 1: Scope Schema
 
 - Add `Project` and `Folder` models.

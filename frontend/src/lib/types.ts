@@ -3,6 +3,12 @@
 export type Intent = 'ratio' | 'chronology' | 'summary' | 'general';
 
 export interface SourceHit {
+  chunk_id?: string | null;
+  file_id?: string | null;
+  file_name?: string | null;
+  project_id?: string | null;
+  folder_id?: string | null;
+  page?: number | null;
   source: string | null;
   doc_type: string | null;
   week: string | null;
@@ -30,6 +36,7 @@ export interface ChatStreamEvents {
   answer_chunk?: { text: string };
   done?: {
     session_id: string;
+    scope?: RetrievalScope | null;
     intent: Intent | null;
     latency_ms: number;
     final_answer: string;
@@ -40,6 +47,9 @@ export interface ChatStreamEvents {
 export interface SessionSummary {
   id: string;
   title: string;
+  project_id?: string | null;
+  folder_id?: string | null;
+  scope?: RetrievalScope | null;
   created_at: string;
   updated_at: string;
 }
@@ -48,6 +58,7 @@ export interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  scope?: RetrievalScope | null;
   intent?: string | null;
   retrieved_chunk_ids?: string[] | null;
   sources?: SourceHit[] | null;
@@ -63,6 +74,8 @@ export interface FileMeta {
   name: string;
   mime: string;
   size_bytes: number;
+  project_id?: string | null;
+  folder_id?: string | null;
   status: 'uploaded' | 'processing' | 'queued' | 'ready' | 'failed';
   error?: string | null;
   // Free-form so callers can categorise (case, statute, note, past_paper,
@@ -78,6 +91,41 @@ export interface PresignResponse {
   upload_url: string;
   blob_key: string;
   method: 'PUT' | 'POST';
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  slug: string;
+  description?: string | null;
+  color?: string | null;
+  archived_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Folder {
+  id: string;
+  project_id: string;
+  parent_id?: string | null;
+  name: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type RetrievalScope =
+  | { type: 'all' }
+  | { type: 'project'; project_id: string }
+  | { type: 'folder'; project_id?: string | null; folder_id: string }
+  | { type: 'files'; project_id?: string | null; folder_id?: string | null; file_ids: string[] }
+  | { type: 'week'; project_id?: string | null; folder_id?: string | null; week: string }
+  | { type: 'doc_type'; project_id?: string | null; folder_id?: string | null; doc_types: string[] };
+
+export interface FileListScope {
+  projectId?: string | null;
+  folderId?: string | null;
+  status?: string | null;
 }
 
 export interface ExamMCQ {

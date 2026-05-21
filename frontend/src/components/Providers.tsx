@@ -20,11 +20,11 @@ import { setTokenProvider } from '@/lib/api';
 
 /** Bumped whenever cached query shapes change in a backwards-incompatible
  *  way; mismatched values invalidate the entire persisted cache on next load. */
-const CACHE_BUSTER = 'v1';
+const CACHE_BUSTER = 'v2-scoped-library';
 const CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 const CACHE_KEY = 'ashgpt-rq-cache';
 
-const PERSISTED_QUERY_KEYS = new Set(['sessions', 'messages', 'files', 'users']);
+const PERSISTED_QUERY_KEYS = new Set(['sessions', 'messages', 'files', 'folders', 'projects', 'users']);
 
 /** Read the persisted snapshot synchronously inside the QueryClient's
  *  lazy initializer. Doing this *before* render — instead of via

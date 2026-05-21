@@ -38,6 +38,9 @@ async def ingest_file(
     mime: str,
     week: str | None = None,
     doc_type: str = "document",
+    project_id: str | None = None,
+    folder_id: str | None = None,
+    file_name: str | None = None,
 ) -> int:
     """Ingest one file end-to-end. Returns the chunk count."""
     blob = make_blob_store()
@@ -64,6 +67,9 @@ async def ingest_file(
             md = {
                 "chunk_id": cid,
                 "file_id": file_id,
+                "file_name": file_name or blob_key.rsplit("/", 1)[-1],
+                "project_id": project_id,
+                "folder_id": folder_id,
                 "namespace": user_id,
                 "source": section.meta.get("source") or blob_key.rsplit("/", 1)[-1],
                 "type": _doc_type_for_storage(doc_type, section, is_image_mime),
@@ -105,6 +111,8 @@ async def ingest_file(
                     id=ids[i],
                     file_id=file_id,
                     user_id=user_id,
+                    project_id=project_id,
+                    folder_id=folder_id,
                     content=chunks[i],
                     page=metas[i].get("page"),
                     chunk_index=metas[i].get("chunk_index", 0),
@@ -146,6 +154,9 @@ def ingest_file_sync(
     mime: str,
     week: str | None = None,
     doc_type: str = "document",
+    project_id: str | None = None,
+    folder_id: str | None = None,
+    file_name: str | None = None,
 ) -> int:
     import asyncio
 
@@ -157,5 +168,8 @@ def ingest_file_sync(
             mime=mime,
             week=week,
             doc_type=doc_type,
+            project_id=project_id,
+            folder_id=folder_id,
+            file_name=file_name,
         )
     )

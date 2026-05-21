@@ -8,6 +8,7 @@ import { streamChat } from './streaming';
 import type {
   ChatHistoryOverflow,
   Intent,
+  RetrievalScope,
   SourceHit,
   VerificationReport,
 } from './types';
@@ -31,6 +32,7 @@ export interface UseChatOptions {
   initialSessionId?: string | null;
   /** Server-hydrated turns to render before the first new send. */
   initialTurns?: ChatTurn[];
+  scope?: RetrievalScope | null;
   /** Called the first time the backend returns a session_id — typically used
    *  by the ``/chat`` (no-id) landing route to ``router.replace`` to
    *  ``/chat/<id>`` so the URL becomes the source of truth.  */
@@ -154,6 +156,7 @@ export function useChat(opts: UseChatOptions = {}) {
               query,
               session_id: sessionIdRef.current,
               week_filter: sendOpts?.week_filter ?? null,
+              scope: opts.scope ?? null,
             },
             {
               onNode: (n) => {
@@ -238,7 +241,7 @@ export function useChat(opts: UseChatOptions = {}) {
         }
       }
     },
-    [getToken, replaceTurns],
+    [getToken, opts.scope, replaceTurns],
   );
 
   return { turns, send, busy, error, sessionId, nodeTrace };

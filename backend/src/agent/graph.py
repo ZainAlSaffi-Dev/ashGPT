@@ -167,6 +167,7 @@ def run_query(
     week_filter: str | None = None,
     chat_history: list[dict[str, str]] | None = None,
     user_id: str | None = None,
+    scope: dict | None = None,
     *,
     use_cache: bool | None = None,
     use_escalation: bool | None = None,
@@ -196,6 +197,8 @@ def run_query(
         initial_state["week_filter"] = week_filter
     if user_id:
         initial_state["user_id"] = user_id
+    if scope:
+        initial_state["retrieval_scope"] = scope
     prepared, overflow, memory = prepare_chat_memory_for_run(chat_history)
     if prepared:
         initial_state["chat_history"] = prepared
@@ -257,7 +260,7 @@ def _chunk_ids_from(result: AgentState) -> list[str]:
     """Pull stable identifiers off retrieved docs for cache keying."""
     ids: list[str] = []
     for d in (result.get("retrieved_texts") or []) + (result.get("retrieved_slides") or []):
-        ids.append(d.get("source") or d.get("content", "")[:80])
+        ids.append(d.get("chunk_id") or d.get("source") or d.get("content", "")[:80])
     return ids
 
 
@@ -298,12 +301,19 @@ async def _cache_write_safe(result: AgentState, query: str, user_id: str) -> Non
     from src.agent.cache import make_cache_key, put
 
     chunk_ids = _chunk_ids_from(result)
-    cache_key = make_cache_key(user_id, query, chunk_ids)
+    scope_hash = result.get("retrieval_scope_hash")
+    cache_key = make_cache_key(user_id, query, chunk_ids, scope_hash=scope_hash)
     payload = {
         "intent": result.get("intent"),
         "sources": [
             {
                 "source": d.get("source"),
+                "chunk_id": d.get("chunk_id"),
+                "file_id": d.get("file_id"),
+                "file_name": d.get("file_name"),
+                "project_id": d.get("project_id"),
+                "folder_id": d.get("folder_id"),
+                "page": d.get("page"),
                 "doc_type": d.get("doc_type"),
                 "week": d.get("week"),
                 "snippet": (d.get("content") or "")[:280],
@@ -312,6 +322,8 @@ async def _cache_write_safe(result: AgentState, query: str, user_id: str) -> Non
             + (result.get("retrieved_slides") or [])
         ],
         "verification_report": result.get("verification_report"),
+        "scope": result.get("retrieval_scope"),
+        "scope_hash": scope_hash,
     }
     await put(
         cache_key=cache_key,
@@ -319,4 +331,5 @@ async def _cache_write_safe(result: AgentState, query: str, user_id: str) -> Non
         answer=result.get("final_answer", ""),
         payload=payload,
         ttl=timedelta(days=ANSWER_CACHE_TTL_DAYS),
+        scope_hash=scope_hash,
     )

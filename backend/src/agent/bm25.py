@@ -239,9 +239,13 @@ def configure_bm25_source(source: BM25Source) -> None:
     _index_cache.clear()
 
 
-def get_bm25_index(namespace: str | None) -> BM25Index:
+def get_bm25_index(
+    namespace: str | None,
+    scope_hash: str | None = None,
+    where: dict | None = None,
+) -> BM25Index:
     """Return the (cached) BM25 index for ``namespace``. Builds on miss."""
-    key = namespace or "__shared__"
+    key = f"{namespace or '__shared__'}:{scope_hash or 'all'}"
     if key in _index_cache:
         return _index_cache[key]
     if _source is None:
@@ -249,8 +253,10 @@ def get_bm25_index(namespace: str | None) -> BM25Index:
         idx = BM25Index([])
     else:
         rows = _source(namespace)
+        if where:
+            rows = [(doc_id, content, meta) for doc_id, content, meta in rows if _meta_match(meta, where)]
         idx = BM25Index(rows)
-        log.info("BM25 index built for ns=%s (%d docs)", namespace, len(idx))
+        log.info("BM25 index built for ns=%s scope=%s (%d docs)", namespace, scope_hash, len(idx))
     _index_cache[key] = idx
     return idx
 
@@ -263,4 +269,6 @@ def invalidate(namespace: str | None = None) -> None:
     if namespace is None:
         _index_cache.clear()
         return
-    _index_cache.pop(namespace or "__shared__", None)
+    prefix = f"{namespace or '__shared__'}:"
+    for key in [k for k in _index_cache if k.startswith(prefix)]:
+        _index_cache.pop(key, None)

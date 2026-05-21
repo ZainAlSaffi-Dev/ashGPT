@@ -23,6 +23,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from src.agent.scope import RetrievalScope
 from src.agent.tools import retrieve_texts
 from src.config import SYNTHESIS_MODEL
 from src.llm import llm_call
@@ -142,20 +143,24 @@ async def generate_exam(
     difficulty: Literal["easy", "medium", "hard"] = "medium",
     model: str | None = None,
 ) -> Exam:
-    week_filter = scope_value if scope_type == "week" else None
+    if scope_type == "file":
+        scope = RetrievalScope(type="files", file_ids=(scope_value,) if scope_value else (), explicit=True)
+    elif scope_type == "week":
+        scope = RetrievalScope(type="week", week=scope_value, explicit=True)
+    elif scope_type == "past_paper":
+        scope = RetrievalScope(type="doc_type", doc_types=("past_paper",), explicit=True)
+    else:
+        scope = RetrievalScope()
 
     # Pull a wide pool from the user's notes. Hybrid retrieval enabled by
     # default surfaces both lexical case-name hits and semantic passages.
     docs = retrieve_texts(
         f"key principles overview difficulty {difficulty}",
-        week=week_filter,
+        week=scope.week,
         k=12,
         namespace=user_id,
+        scope=scope,
     )
-    if scope_type == "file" and scope_value:
-        docs = [d for d in docs if d.get("source") == scope_value][:12] or docs
-    if scope_type == "past_paper":
-        docs = [d for d in docs if d.get("doc_type") == "past_paper"][:12] or docs
 
     if not docs:
         raise ValueError("no chunks available for the requested scope")
@@ -191,6 +196,7 @@ async def generate_exam(
         user_id=user_id,
         scope_type=scope_type,
         scope_value=scope_value,
+        scope=scope.snapshot(),
         num_mcq=len(exam.mcq),
         num_short=len(exam.short),
         difficulty=difficulty,

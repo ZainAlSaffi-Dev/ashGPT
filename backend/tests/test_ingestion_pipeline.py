@@ -115,9 +115,7 @@ async def test_ingest_invalidates_bm25_cache(env, monkeypatch):
     bm25.configure_bm25_source(lambda ns: [("old", "old content", {})])
     bm25.invalidate()
     bm25.get_bm25_index(env["user_id"])  # populate cache
-    assert (env["user_id"] or "__shared__") in bm25._index_cache or (
-        "__shared__" in bm25._index_cache
-    )
+    assert any(k.startswith(f"{env['user_id']}:") for k in bm25._index_cache)
 
     with patch.object(pipeline_mod, "make_vector_store", return_value=env["vs"]):
         with patch.object(pipeline_mod, "ZeroEntropyEmbeddings") as mock_emb:
@@ -130,7 +128,7 @@ async def test_ingest_invalidates_bm25_cache(env, monkeypatch):
             )
 
     # Cache entry for this namespace should be gone after ingest.
-    assert env["user_id"] not in bm25._index_cache
+    assert not any(k.startswith(f"{env['user_id']}:") for k in bm25._index_cache)
 
 
 @pytest.mark.asyncio

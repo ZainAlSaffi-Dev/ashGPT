@@ -215,6 +215,8 @@ Backend container picks up the same `[vars]` block as the worker (single `infra/
 1. **No proper Alembic yet.** `init_db` runs `create_all` then idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for post-v1 columns on Postgres. SQLite (tests) skips the ALTERs because `create_all` already produces the right schema on a fresh DB. When you add new columns, append to `_apply_inline_migrations` in `backend/src/storage/db.py`.
 2. **Secrets** never go into Codex at all. No API keys, tokens, passwords, connection strings in chat or in code committed to the repo.
 3. **Conversation memory is not source evidence.** `conversation_memory` is rebuilt per session from older persisted turns and may resolve shorthand, jurisdiction, goals, corrections, and authorities already discussed, but answer facts still need retrieved `[S#]` citations or `[external]`.
+4. **Scoped retrieval is two-legged.** Project/folder/file scope must be applied to both pgvector metadata filters and BM25 cache/search. BM25 cache keys are now `user_id:scope_hash`; invalidating a user must clear all keys with that prefix.
+5. **Worker route deploys need zone route permissions.** Because `infra/wrangler.toml` manages `ashgpt.xyz/__clerk` Worker routes, the GitHub `CLOUDFLARE_API_TOKEN` needs zone-level `Workers Routes: Edit/Write` for `ashgpt.xyz` plus `Zone: Read`; Worker/Pages edit permissions alone will fail route updates with Cloudflare code 10000.
 
 ---
 
@@ -256,6 +258,7 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - Future-session planning: added focused handoff prompts for a next-generation in-chat memory system and a browser-driven frontend animation/refresh/endpoint QA pass.
 - In-chat memory v1: backend now keeps the latest 24 messages verbatim, compresses older persisted turns into per-session `conversation_memory`, feeds that into router/retrieval/synthesis with explicit grounding boundaries, and emits `memory` SSE telemetry when compression occurs.
 - Project-scoped library design: added `docs/project_scoped_library_system_design.md` mapping current user/session/upload persistence and the target project/folder retrieval architecture.
+- Project-scoped library v1: added project/folder persistence and CRUD, scoped file upload/list/move, scoped sessions/messages/chat snapshots, project/folder/file retrieval filters across dense + BM25, source metadata rehydration, and a basic frontend subject/folder library selector with scoped upload/chat plumbing.
 
 ---
 

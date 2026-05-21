@@ -13,6 +13,7 @@ import type {
   ChatStreamEvents,
   Intent,
   SourceHit,
+  RetrievalScope,
   VerificationReport,
 } from './types';
 import { resolveApiBase } from './api';
@@ -27,6 +28,7 @@ export interface ChatStreamHandlers {
   onAnswerChunk?: (text: string) => void;
   onDone?: (payload: {
     session_id: string;
+    scope?: RetrievalScope | null;
     intent: Intent | null;
     latency_ms: number;
     final_answer: string;
@@ -39,6 +41,7 @@ export async function streamChat(
     query: string;
     session_id?: string | null;
     week_filter?: string | null;
+    scope?: RetrievalScope | null;
   },
   handlers: ChatStreamHandlers,
   opts?: {
@@ -136,6 +139,7 @@ export function dispatch(
         intent: (data.intent as Intent | null) ?? null,
         latency_ms: Number(data.latency_ms ?? 0),
         final_answer: String(data.final_answer ?? ''),
+        ...(data.scope !== undefined ? { scope: data.scope as RetrievalScope | null } : {}),
       });
       break;
     case 'error':

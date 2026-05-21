@@ -127,7 +127,7 @@ def _retrieved_chunk_ids(state: AgentState) -> list[str]:
     """Stable per-chunk identifiers for cache keying. Matches graph._chunk_ids_from."""
     ids: list[str] = []
     for d in (state.get("retrieved_texts") or []) + (state.get("retrieved_slides") or []):
-        ids.append(d.get("source") or (d.get("content") or "")[:80])
+        ids.append(d.get("chunk_id") or d.get("source") or (d.get("content") or "")[:80])
     return ids
 
 
@@ -257,6 +257,9 @@ def retrieval_node(state: AgentState) -> dict:
 
     week = state.get("week_filter")
     namespace = state.get("user_id")
+    from src.agent.scope import RetrievalScope
+
+    scope = RetrievalScope.from_input(state.get("retrieval_scope"), week_filter=week)
     use_reranker_override = state.get("use_reranker")
     log.info(
         "RetrievalNode: searching KB (week=%s, ns=%s, follow_up=%s, rewrote=%s, rerank_override=%s)",
@@ -276,6 +279,7 @@ def retrieval_node(state: AgentState) -> dict:
         use_reranker=use_reranker_override,
         namespace=namespace,
         timings=sub_timings,
+        scope=scope,
     )
 
     log.info(
@@ -287,6 +291,10 @@ def retrieval_node(state: AgentState) -> dict:
     out: dict = {
         "retrieved_texts": texts,
         "retrieved_slides": slides,
+        "retrieval_scope_hash": scope.scope_hash(),
+        "no_material_reason": "no material in the selected scope"
+        if scope.explicit and not texts and not slides
+        else "",
         "node_trace": _append_trace(state, "retrieval"),
         "_timing_sub": sub_timings or None,
     }
@@ -326,7 +334,9 @@ def cache_check_node(state: AgentState) -> dict:
     if not chunk_ids:
         return {"cache_hit": False, "node_trace": _append_trace(state, "cache_check")}
 
-    cache_key = make_cache_key(user_id, state["query"], chunk_ids)
+    cache_key = make_cache_key(
+        user_id, state["query"], chunk_ids, scope_hash=state.get("retrieval_scope_hash")
+    )
 
     import asyncio
 

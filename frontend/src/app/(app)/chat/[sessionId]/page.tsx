@@ -42,12 +42,14 @@ export default function ChatSessionPage({ params }: PageProps) {
     verification: m.verification ?? undefined,
     latency_ms: m.latency_ms ?? undefined,
   }));
+  const scope = messages?.find((m) => m.scope)?.scope ?? null;
 
   return (
     <ChatSurface
       initialSessionId={sessionId}
       initialTurns={messages ? turns : undefined}
       historyLoading={historyLoading}
+      scope={scope}
     />
   );
 }

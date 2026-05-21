@@ -43,10 +43,12 @@ def normalise_query(q: str) -> str:
     return cleaned
 
 
-def make_cache_key(user_id: str, query: str, chunk_ids: Iterable[str]) -> str:
+def make_cache_key(
+    user_id: str, query: str, chunk_ids: Iterable[str], scope_hash: str | None = None
+) -> str:
     """SHA-256 of namespace + normalised query + canonicalised chunk-id set."""
     ids = sorted({str(c) for c in chunk_ids if c})
-    raw = f"{user_id}\x1f{normalise_query(query)}\x1f{'|'.join(ids)}"
+    raw = f"{user_id}\x1f{normalise_query(query)}\x1f{scope_hash or 'all'}\x1f{'|'.join(ids)}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -78,6 +80,7 @@ async def put(
     answer: str,
     payload: dict[str, Any],
     ttl: timedelta = DEFAULT_TTL,
+    scope_hash: str | None = None,
 ) -> None:
     """Upsert a cache entry."""
     expires = datetime.now(timezone.utc) + ttl
@@ -90,12 +93,14 @@ async def put(
         if existing:
             existing.answer = answer
             existing.payload = payload
+            existing.scope_hash = scope_hash
             existing.expires_at = expires
         else:
             session.add(
                 AnswerCache(
                     cache_key=cache_key,
                     user_id=user_id,
+                    scope_hash=scope_hash,
                     answer=answer,
                     payload=payload,
                     expires_at=expires,

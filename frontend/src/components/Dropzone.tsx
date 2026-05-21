@@ -11,6 +11,8 @@ import { cn } from '@/lib/utils';
 
 interface Props {
   onComplete?: () => void;
+  projectId?: string | null;
+  folderId?: string | null;
 }
 
 type UploadState =
@@ -58,7 +60,7 @@ function humanError(err: unknown): string {
   return msg;
 }
 
-export function Dropzone({ onComplete }: Props) {
+export function Dropzone({ onComplete, projectId = null, folderId = null }: Props) {
   const { getToken } = useAuth();
   const [uploads, setUploads] = useState<UploadStatus[]>([]);
 
@@ -79,6 +81,8 @@ export function Dropzone({ onComplete }: Props) {
           {
             name: file.name,
             mime: file.type || 'application/octet-stream',
+            project_id: projectId,
+            folder_id: folderId,
           },
           token,
         );
@@ -99,7 +103,7 @@ export function Dropzone({ onComplete }: Props) {
         update(id, { state: 'failed', detail: humanError(e) });
       }
     },
-    [getToken, update],
+    [folderId, getToken, projectId, update],
   );
 
   const onDrop = useCallback(

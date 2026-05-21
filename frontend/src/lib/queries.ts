@@ -12,14 +12,17 @@ import {
 import {
   deleteSession,
   getMe,
+  listFolders,
   listFiles,
+  listProjects,
   listMessages,
   listSessions,
   markOnboarded,
   withAuth,
   type UserMe,
 } from './api';
-import type { SessionSummary } from './types';
+import type { FileListScope, SessionSummary } from './types';
+import { fileScopeKey } from './scope';
 import { useAuthReady } from './useAuthReady';
 
 /** Files list, cached so library + exam + onboarding share one fetch.
@@ -30,13 +33,55 @@ interface QueryGateOptions {
   enabled?: boolean;
 }
 
-export function useFiles(options: QueryGateOptions = {}) {
+export const projectKeys = {
+  all: ['projects'] as const,
+  folders: (projectId: string | null | undefined) => ['folders', projectId ?? null] as const,
+  files: (scope: FileListScope = {}) => ['files', fileScopeKey(scope)] as const,
+  sessions: (projectId?: string | null) => ['sessions', projectId ?? null] as const,
+};
+
+export function useProjects(options: QueryGateOptions = {}) {
   const { getToken } = useAuth();
   const authReady = useAuthReady();
   return useQuery({
-    queryKey: ['files'],
+    queryKey: projectKeys.all,
     enabled: authReady && options.enabled !== false,
-    queryFn: () => withAuth(getToken, (token) => listFiles(token)),
+    queryFn: () => withAuth(getToken, (token) => listProjects(token)),
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useFolders(projectId: string | null | undefined, options: QueryGateOptions = {}) {
+  const { getToken } = useAuth();
+  const authReady = useAuthReady();
+  return useQuery({
+    queryKey: projectKeys.folders(projectId),
+    enabled: authReady && !!projectId && options.enabled !== false,
+    queryFn: () => withAuth(getToken, (token) => listFolders(projectId!, token)),
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useFiles(scopeOrOptions: FileListScope | QueryGateOptions = {}, maybeOptions: QueryGateOptions = {}) {
+  const { getToken } = useAuth();
+  const authReady = useAuthReady();
+  const isLegacyOptions =
+    'enabled' in scopeOrOptions &&
+    !('projectId' in scopeOrOptions) &&
+    !('folderId' in scopeOrOptions) &&
+    !('status' in scopeOrOptions);
+  const scope = isLegacyOptions ? {} : (scopeOrOptions as FileListScope);
+  const options = isLegacyOptions ? (scopeOrOptions as QueryGateOptions) : maybeOptions;
+  return useQuery({
+    queryKey: projectKeys.files(scope),
+    enabled: authReady && options.enabled !== false,
+    queryFn: () => withAuth(getToken, (token) => listFiles(token, scope)),
     // Fallback so an in-flight file that never reaches a terminal status
     // still gets revalidated on revisit, instead of polling forever.
     staleTime: 5 * 60_000,
@@ -55,13 +100,13 @@ export function useFiles(options: QueryGateOptions = {}) {
   });
 }
 
-export function useSessions(options: QueryGateOptions = {}) {
+export function useSessions(options: QueryGateOptions & { projectId?: string | null } = {}) {
   const { getToken } = useAuth();
   const authReady = useAuthReady();
   return useQuery({
-    queryKey: ['sessions'],
+    queryKey: projectKeys.sessions(options.projectId),
     enabled: authReady && options.enabled !== false,
-    queryFn: () => withAuth(getToken, (token) => listSessions(token)),
+    queryFn: () => withAuth(getToken, (token) => listSessions(token, { projectId: options.projectId })),
     // Sidebar list shouldn't flicker on tab focus; it's append-only mostly
     // and gets invalidated on create/delete.
     staleTime: 5 * 60_000,
@@ -92,9 +137,9 @@ export function useMessages(sessionId: string | null | undefined) {
 }
 
 /** Used by upload + delete to invalidate the shared file list cache. */
-export function useInvalidateFiles() {
+export function useInvalidateFiles(scope: FileListScope = {}) {
   const qc = useQueryClient();
-  return () => qc.invalidateQueries({ queryKey: ['files'] });
+  return () => qc.invalidateQueries({ queryKey: projectKeys.files(scope) });
 }
 
 /** Optimistic session delete: removes from the cached list immediately,

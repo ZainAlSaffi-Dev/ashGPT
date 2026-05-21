@@ -17,6 +17,12 @@ class RetrievedDocument(TypedDict):
     """A single document retrieved from the knowledge base."""
 
     content: str
+    chunk_id: str
+    file_id: str
+    file_name: str
+    project_id: str | None
+    folder_id: str | None
+    page: int | None
     source: str
     week: str
     doc_type: str
@@ -55,6 +61,9 @@ class AgentState(TypedDict, total=False):
     chat_history: list[ChatMessage]  # prior turns only; current message is ``query``
     conversation_memory: ConversationMemory  # compressed older turns; never source evidence
     user_id: str | None  # tenant namespace; None ⇒ shared/legacy collection
+    retrieval_scope: dict
+    retrieval_scope_hash: str
+    no_material_reason: str
 
     # ── Router output ──────────────────────────────────────────────────────
     intent: Literal["ratio", "chronology", "summary", "general"]

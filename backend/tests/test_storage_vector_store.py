@@ -69,6 +69,36 @@ def test_inmemory_where_filter():
     assert [h.id for h in hits] == ["a"]
 
 
+def test_inmemory_project_file_filters_and_metadata_update():
+    store = InMemoryVectorStore()
+    store.upsert(
+        [
+            VectorItem(
+                "a",
+                _embed("x"),
+                "x",
+                {"project_id": "p1", "folder_id": "old", "file_id": "f1"},
+                namespace="u",
+            ),
+            VectorItem(
+                "b",
+                _embed("x"),
+                "x",
+                {"project_id": "p2", "folder_id": "other", "file_id": "f2"},
+                namespace="u",
+            ),
+        ]
+    )
+    hits = store.search(_embed("x"), namespace="u", k=5, where={"project_id": "p1"})
+    assert [h.id for h in hits] == ["a"]
+    hits = store.search(_embed("x"), namespace="u", k=5, where={"file_id": {"$in": ["f2"]}})
+    assert [h.id for h in hits] == ["b"]
+
+    store.update_metadata(["a"], namespace="u", patch={"folder_id": "new"})
+    assert store.search(_embed("x"), namespace="u", k=5, where={"folder_id": "old"}) == []
+    assert [h.id for h in store.search(_embed("x"), namespace="u", k=5, where={"folder_id": "new"})] == ["a"]
+
+
 def test_inmemory_delete_and_delete_namespace():
     store = InMemoryVectorStore()
     items = [

@@ -24,10 +24,10 @@ from sse_starlette.sse import EventSourceResponse
 
 from src.agent.graph import run_query
 from src.config import SYNTHESIS_MODEL
-from src.storage.db import Message, Session, User
+from src.storage.db import Folder, Message, Project, Session, User
 
 from .deps import current_user, db_session
-from .schemas import ChatRequest
+from .schemas import ChatRequest, RetrievalScopeIn
 
 router = APIRouter(tags=["chat"])
 log = logging.getLogger(__name__)
@@ -38,8 +38,13 @@ def _sse(event: str, data: dict) -> dict:
 
 
 async def _ensure_session(
-    db: AsyncSession, user: User, session_id: str | None, fallback_title: str
+    db: AsyncSession,
+    user: User,
+    session_id: str | None,
+    fallback_title: str,
+    scope: RetrievalScopeIn | None = None,
 ) -> Session:
+    project_id, folder_id, scope_snapshot = await _resolve_scope(db, user, scope)
     if session_id:
         sess = (
             await db.execute(
@@ -48,12 +53,49 @@ async def _ensure_session(
         ).scalar_one_or_none()
         if sess is None:
             raise HTTPException(404, "session not found")
+        if scope_snapshot and sess.scope and sess.scope != scope_snapshot:
+            raise HTTPException(409, "session scope mismatch")
         return sess
-    sess = Session(user_id=user.id, title=fallback_title[:80] or "New chat")
+    sess = Session(
+        user_id=user.id,
+        title=fallback_title[:80] or "New chat",
+        project_id=project_id,
+        folder_id=folder_id,
+        scope=scope_snapshot,
+    )
     db.add(sess)
     await db.commit()
     await db.refresh(sess)
     return sess
+
+
+async def _resolve_scope(
+    db: AsyncSession, user: User, scope: RetrievalScopeIn | None
+) -> tuple[str | None, str | None, dict | None]:
+    if scope is None:
+        return None, None, None
+    project_id = scope.project_id
+    folder_id = scope.folder_id
+    if scope.type == "project" and not project_id:
+        raise HTTPException(400, "project scope requires project_id")
+    if scope.type == "folder" and not folder_id:
+        raise HTTPException(400, "folder scope requires folder_id")
+    if project_id:
+        project = (
+            await db.execute(select(Project).where(Project.id == project_id, Project.user_id == user.id))
+        ).scalar_one_or_none()
+        if project is None:
+            raise HTTPException(404, "project not found")
+    if folder_id:
+        folder = (
+            await db.execute(select(Folder).where(Folder.id == folder_id, Folder.user_id == user.id))
+        ).scalar_one_or_none()
+        if folder is None:
+            raise HTTPException(404, "folder not found")
+        if project_id and folder.project_id != project_id:
+            raise HTTPException(400, "folder does not belong to project")
+        project_id = project_id or folder.project_id
+    return project_id, folder_id, scope.model_dump(exclude_none=True)
 
 
 async def _load_history(db: AsyncSession, session_id: str) -> list[dict[str, str]]:
@@ -71,11 +113,11 @@ async def chat(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[AsyncSession, Depends(db_session)],
 ) -> EventSourceResponse:
-    session = await _ensure_session(db, user, body.session_id, fallback_title=body.query)
+    session = await _ensure_session(db, user, body.session_id, fallback_title=body.query, scope=body.scope)
     history = await _load_history(db, session.id)
 
     user_msg = Message(
-        session_id=session.id, user_id=user.id, role="user", content=body.query
+        session_id=session.id, user_id=user.id, role="user", content=body.query, scope=session.scope
     )
     db.add(user_msg)
     await db.commit()
@@ -98,10 +140,13 @@ async def chat(
             result = await loop.run_in_executor(
                 None,
                 lambda: run_query(
-                    query=query,
-                    week_filter=week_filter,
-                    chat_history=history,
-                    user_id=user_id,
+                    **{
+                        "query": query,
+                        "week_filter": week_filter,
+                        "chat_history": history,
+                        "user_id": user_id,
+                        **({"scope": session.scope} if session.scope else {}),
+                    }
                 ),
             )
             latency_ms = int((time.time() - started) * 1000)
@@ -111,6 +156,12 @@ async def chat(
 
             sources = [
                 {
+                    "chunk_id": d.get("chunk_id"),
+                    "file_id": d.get("file_id"),
+                    "file_name": d.get("file_name"),
+                    "project_id": d.get("project_id"),
+                    "folder_id": d.get("folder_id"),
+                    "page": d.get("page"),
                     "source": d.get("source"),
                     "doc_type": d.get("doc_type"),
                     "week": d.get("week"),
@@ -155,8 +206,11 @@ async def chat(
                 user_id=user_id,
                 role="assistant",
                 content=final,
+                scope=session.scope,
                 intent=result.get("intent"),
-                retrieved_chunk_ids=[s.get("source") for s in sources if s.get("source")],
+                retrieved_chunk_ids=[
+                    s.get("chunk_id") or s.get("source") for s in sources if s.get("chunk_id") or s.get("source")
+                ],
                 sources=sources,
                 irac=result.get("irac_analysis"),
                 mermaid=result.get("mermaid_diagram"),
@@ -170,6 +224,7 @@ async def chat(
                 "done",
                 {
                     "session_id": session_id,
+                    "scope": session.scope,
                     "intent": result.get("intent"),
                     "latency_ms": latency_ms,
                     "final_answer": final,

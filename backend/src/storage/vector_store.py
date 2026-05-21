@@ -66,6 +66,8 @@ class VectorStore(Protocol):
 
     def delete(self, ids: Iterable[str], namespace: str) -> None: ...
 
+    def update_metadata(self, ids: Iterable[str], namespace: str, patch: dict[str, Any]) -> None: ...
+
     def delete_namespace(self, namespace: str) -> None: ...
 
     def list_namespace(self, namespace: str) -> list[VectorItem]:
@@ -225,6 +227,24 @@ class PgVectorStore:
                 {"ns": namespace, "ids": ids},
             )
 
+    def update_metadata(self, ids: Iterable[str], namespace: str, patch: dict[str, Any]) -> None:
+        from sqlalchemy import text
+
+        ids = list(ids)
+        if not ids:
+            return
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    UPDATE {self._table}
+                    SET metadata = metadata || CAST(:patch AS JSONB)
+                    WHERE namespace = :ns AND id = ANY(:ids)
+                    """
+                ),
+                {"ns": namespace, "ids": ids, "patch": _json_dumps(patch)},
+            )
+
     def delete_namespace(self, namespace: str) -> None:
         from sqlalchemy import text
 
@@ -369,6 +389,9 @@ class CloudflareVectorize:
         r = self._json_client.post(f"{self._url}/delete-by-ids", json={"ids": ids})
         r.raise_for_status()
 
+    def update_metadata(self, ids: Iterable[str], namespace: str, patch: dict[str, Any]) -> None:
+        raise NotImplementedError("vectorize metadata updates require re-upsert")
+
     def delete_namespace(self, namespace: str) -> None:
         r = self._json_client.post(
             f"{self._url}/delete-by-filter", json={"namespace": namespace}
@@ -417,6 +440,11 @@ class InMemoryVectorStore:
         for i in list(ids):
             if i in self._items and self._items[i].namespace == namespace:
                 del self._items[i]
+
+    def update_metadata(self, ids: Iterable[str], namespace: str, patch: dict[str, Any]) -> None:
+        for i in ids:
+            if i in self._items and self._items[i].namespace == namespace:
+                self._items[i].metadata.update(patch)
 
     def delete_namespace(self, namespace: str) -> None:
         for k in [k for k, v in self._items.items() if v.namespace == namespace]:

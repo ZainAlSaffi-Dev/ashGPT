@@ -12,7 +12,7 @@ import { SkeletonList } from '@/components/ui/Skeleton';
 import { turnsToCachedMessages, upsertCachedSession } from '@/lib/chat-cache';
 import { useOnboarding } from '@/lib/queries';
 import { useChat, type ChatTurn } from '@/lib/useChat';
-import type { Message, SessionSummary } from '@/lib/types';
+import type { Message, RetrievalScope, SessionSummary } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 export interface ChatSurfaceProps {
@@ -22,6 +22,7 @@ export interface ChatSurfaceProps {
   initialTurns?: ChatTurn[];
   /** True while a known session's history is loading for the first time. */
   historyLoading?: boolean;
+  scope?: RetrievalScope | null;
 }
 
 /**
@@ -34,6 +35,7 @@ export function ChatSurface({
   initialSessionId,
   initialTurns,
   historyLoading = false,
+  scope = null,
 }: ChatSurfaceProps) {
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -41,12 +43,13 @@ export function ChatSurface({
   const { turns, send, busy, nodeTrace, sessionId } = useChat({
     initialSessionId,
     initialTurns,
+    scope,
     onTurnCommitted: (id, committedTurns) => {
       queryClient.setQueryData<Message[]>(
         ['messages', id],
         turnsToCachedMessages(committedTurns),
       );
-      queryClient.setQueryData<SessionSummary[]>(['sessions'], (sessions) =>
+      queryClient.setQueriesData<SessionSummary[]>({ queryKey: ['sessions'] }, (sessions) =>
         upsertCachedSession(sessions, id, committedTurns),
       );
     },

@@ -32,6 +32,7 @@ from src.agent.bm25 import (
     get_bm25_index,
     reciprocal_rank_fusion,
 )
+from src.agent.scope import RetrievalScope
 from src.agent.state import RetrievedDocument
 from src.config import (
     BM25_FETCH_K_SLIDES,
@@ -96,6 +97,7 @@ def _build_filter(
     week: str | None = None,
     doc_types: list[str] | None = None,
     namespace: str | None = None,
+    scope: RetrievalScope | None = None,
 ) -> dict | None:
     """Build an intermediate where-filter from optional metadata constraints.
 
@@ -121,6 +123,13 @@ def _build_filter(
 
     if namespace:
         conditions.append({"namespace": {"$eq": namespace}})
+
+    if scope:
+        for key, value in scope.metadata_filter().items():
+            if isinstance(value, dict) and "$in" in value:
+                conditions.append({key: {"$in": value["$in"]}})
+            else:
+                conditions.append({key: {"$eq": value}})
 
     if not conditions:
         return None
@@ -195,6 +204,12 @@ def _hit_to_retrieved(hit: SearchHit) -> RetrievedDocument:
     meta = hit.metadata or {}
     return RetrievedDocument(
         content=hit.content,
+        chunk_id=meta.get("chunk_id") or hit.id,
+        file_id=meta.get("file_id", ""),
+        file_name=meta.get("file_name", ""),
+        project_id=meta.get("project_id"),
+        folder_id=meta.get("folder_id"),
+        page=meta.get("page"),
         source=meta.get("source", ""),
         week=meta.get("week", ""),
         doc_type=meta.get("type", ""),
@@ -215,7 +230,11 @@ def _dense_search(
     key out of the metadata where-dict before forwarding — pgvector doesn't
     store namespace inside the JSONB metadata blob.
     """
-    where = {k_: v for k_, v in (factory_where or {}).items() if k_ != "namespace"}
+    where = {
+        k_: v
+        for k_, v in (factory_where or {}).items()
+        if k_ not in {"namespace", "_scope_hash"}
+    }
     return _get_store().search(
         query_vector=query_vector,
         namespace=namespace or "",
@@ -235,6 +254,7 @@ def _hybrid_search(
     fused_k: int,
     namespace: str | None,
     timings: dict | None = None,
+    scope_hash: str | None = None,
 ) -> list[RetrievedDocument]:
     """Dense ANN + BM25 fused via RRF, returning the top-``fused_k`` docs.
 
@@ -247,6 +267,8 @@ def _hybrid_search(
     _ensure_bm25_configured()
 
     factory_where = _chroma_filter_to_meta(where_filter) if where_filter else {}
+    if scope_hash:
+        factory_where["_scope_hash"] = scope_hash
 
     # Embed once before the split — both legs reuse this vector.
     t_embed = time.perf_counter()
@@ -273,9 +295,10 @@ def _hybrid_search(
         return ranked, by_id, ms
 
     def _bm25_leg() -> tuple[list[str], dict[str, RetrievedDocument], float]:
-        bm25_index = get_bm25_index(namespace)
+        bm25_where = {k: v for k, v in factory_where.items() if k != "_scope_hash"}
+        bm25_index = get_bm25_index(namespace, scope_hash=scope_hash, where=bm25_where)
         t0 = time.perf_counter()
-        hits = bm25_index.search(query, k=fetch_bm25, where=factory_where)
+        hits = bm25_index.search(query, k=fetch_bm25, where=bm25_where)
         ms = (time.perf_counter() - t0) * 1000
         ranked: list[str] = []
         by_id: dict[str, RetrievedDocument] = {}
@@ -287,6 +310,12 @@ def _hybrid_search(
             content, meta = got
             by_id[doc_id] = RetrievedDocument(
                 content=content,
+                chunk_id=meta.get("chunk_id") or doc_id,
+                file_id=meta.get("file_id", ""),
+                file_name=meta.get("file_name", ""),
+                project_id=meta.get("project_id"),
+                folder_id=meta.get("folder_id"),
+                page=meta.get("page"),
                 source=meta.get("source", ""),
                 week=meta.get("week", ""),
                 doc_type=meta.get("type", ""),
@@ -390,6 +419,7 @@ def retrieve_texts(
     namespace: str | None = None,
     timings: dict | None = None,
     doc_types: list[str] | None = None,
+    scope: RetrievalScope | None = None,
 ) -> list[RetrievedDocument]:
     """Retrieve text chunks from the user's ingested corpus.
 
@@ -407,7 +437,10 @@ def retrieve_texts(
             namespace at the SQL layer when this is set.
         doc_types: Optional metadata filter — useful for exam-scoped flows.
     """
-    where_filter = _build_filter(week=week, doc_types=doc_types, namespace=namespace)
+    if scope and scope.is_explicit_empty():
+        return []
+    where_filter = _build_filter(week=week, doc_types=doc_types, namespace=namespace, scope=scope)
+    scope_hash = scope.scope_hash() if scope else None
 
     rerank_on = USE_RERANKER if use_reranker is None else bool(use_reranker)
     fetch_k = RERANKER_FETCH_K_TEXT if rerank_on else k
@@ -423,6 +456,7 @@ def retrieve_texts(
             fused_k=HYBRID_FUSED_K_TEXT,
             namespace=namespace,
             timings=leg_timings,
+            scope_hash=scope_hash,
         )
         log.info(
             "retrieve_texts [hybrid, rerank=%s]: %d fused (week=%s, ns=%s)",
@@ -434,6 +468,8 @@ def retrieve_texts(
     else:
         t_d = time.perf_counter()
         factory_where = _chroma_filter_to_meta(where_filter) if where_filter else {}
+        if scope_hash:
+            factory_where["_scope_hash"] = scope_hash
         qv = _get_embeddings().embed_query(query)
         hits = _dense_search(
             qv, k=fetch_k, factory_where=factory_where, namespace=namespace
@@ -466,6 +502,7 @@ def retrieve_slides(
     use_reranker: bool | None = None,
     namespace: str | None = None,
     timings: dict | None = None,
+    scope: RetrievalScope | None = None,
 ) -> list[RetrievedDocument]:
     """Retrieve image-bearing chunks (e.g. VLM-described slide / diagram pages).
 
@@ -480,7 +517,10 @@ def retrieve_slides(
         use_reranker: Override the global USE_RERANKER (eval ablation hook).
         namespace: User tenant id (see ``retrieve_texts``).
     """
-    where_filter = _build_filter(week=week, namespace=namespace)
+    if scope and scope.is_explicit_empty():
+        return []
+    where_filter = _build_filter(week=week, namespace=namespace, scope=scope)
+    scope_hash = scope.scope_hash() if scope else None
 
     rerank_on = USE_RERANKER if use_reranker is None else bool(use_reranker)
     fetch_k = RERANKER_FETCH_K_SLIDES if rerank_on else k
@@ -496,6 +536,7 @@ def retrieve_slides(
             fused_k=HYBRID_FUSED_K_SLIDES,
             namespace=namespace,
             timings=leg_timings,
+            scope_hash=scope_hash,
         )
         log.info(
             "retrieve_slides [hybrid, rerank=%s]: %d fused (week=%s, ns=%s)",
@@ -507,6 +548,8 @@ def retrieve_slides(
     else:
         t_d = time.perf_counter()
         factory_where = _chroma_filter_to_meta(where_filter) if where_filter else {}
+        if scope_hash:
+            factory_where["_scope_hash"] = scope_hash
         qv = _get_embeddings().embed_query(query)
         hits = _dense_search(
             qv, k=fetch_k, factory_where=factory_where, namespace=namespace
@@ -539,6 +582,7 @@ def retrieve_all(
     use_reranker: bool | None = None,
     namespace: str | None = None,
     timings: dict | None = None,
+    scope: RetrievalScope | None = None,
 ) -> tuple[list[RetrievedDocument], list[RetrievedDocument]]:
     """Retrieve text and slide chunks concurrently.
 
@@ -563,6 +607,7 @@ def retrieve_all(
             use_reranker=use_reranker,
             namespace=namespace,
             timings=t_dict,
+            scope=scope,
         )
         fs = ex.submit(
             retrieve_slides,
@@ -572,6 +617,7 @@ def retrieve_all(
             use_reranker=use_reranker,
             namespace=namespace,
             timings=s_dict,
+            scope=scope,
         )
         texts = ft.result()
         slides = fs.result()
