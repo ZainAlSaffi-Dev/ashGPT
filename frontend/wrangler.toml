@@ -26,5 +26,4 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 NEXT_PUBLIC_API_BASE = "https://api.ashgpt.xyz"
 NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_live_Y2xlcmsuYXNoZ3B0Lnh5eiQ"
-NEXT_PUBLIC_CLERK_PROXY_URL = "https://ashgpt.xyz/__clerk/"
 NEXT_PUBLIC_CLERK_JS_URL = "https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.js"
