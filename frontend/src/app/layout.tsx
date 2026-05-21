@@ -4,7 +4,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'LawGPT',
+  title: 'ashGPT',
   description: 'A law-student study assistant — IRAC, chronology, summaries, exams from your own notes.',
 };
 

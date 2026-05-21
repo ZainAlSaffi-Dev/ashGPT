@@ -1,17 +1,28 @@
-# Cloudflare Pages config for the LawGPT frontend.
+# Cloudflare Pages config for the ashGPT frontend.
 # Picked up automatically by `wrangler pages deploy` when run from this dir.
 # next-on-pages output ships to .vercel/output/static and runs on Pages
 # Functions, which require nodejs_compat.
+#
+# ``name`` is the Pages project slug (immutable). The slug is internal — the
+# user-facing host is ashgpt.xyz via the Custom Domain on this project. If
+# the project doesn't exist yet, run:
+#   wrangler pages project create ashgpt
+# then attach ashgpt.xyz / www.ashgpt.xyz in the dashboard under
+# Workers & Pages → ashgpt → Custom Domains.
 
-name = "lawgpt"
+name = "ashgpt"
 pages_build_output_dir = ".vercel/output/static"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
 # Public-facing build-time vars (inlined into client JS by Next.js — these
 # are not secrets). Encrypted secrets (CLERK_SECRET_KEY, CLOUDFLARE_API_TOKEN)
-# stay in the dashboard.
+# stay in the dashboard under Settings → Environment variables and bindings.
+#
+# NEXT_PUBLIC_API_BASE points at the edge worker. Once api.ashgpt.xyz is
+# wired up on the worker (Workers & Pages → ashgpt-edge → Triggers → Add
+# Custom Domain), flip the value below to the custom subdomain.
 
 [vars]
-NEXT_PUBLIC_API_BASE = "https://lawgpt-edge.hypersonic3692.workers.dev"
+NEXT_PUBLIC_API_BASE = "https://api.ashgpt.xyz"
 NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_test_c29saWQtZmx5LTE0LmNsZXJrLmFjY291bnRzLmRldiQ"

@@ -1,5 +1,5 @@
 /**
- * Typed fetch wrappers for the LawGPT backend.
+ * Typed fetch wrappers for the ashGPT backend.
  *
  * In production every call uses the relative `/api/*` path (rewritten by
  * `next.config.mjs` to the backend host). In tests the base can be overridden.
@@ -25,8 +25,17 @@ import type {
 export function resolveApiBase(): string {
   const buildBase = process.env.NEXT_PUBLIC_API_BASE;
   if (buildBase) return buildBase;
-  if (typeof window !== 'undefined' && window.location.hostname.endsWith('pages.dev')) {
-    return 'https://lawgpt-edge.hypersonic3692.workers.dev';
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname;
+    // Production custom domain → custom-domain edge worker.
+    if (host === 'ashgpt.xyz' || host === 'www.ashgpt.xyz') {
+      return 'https://api.ashgpt.xyz';
+    }
+    // Preview deploy on pages.dev → legacy workers.dev URL until the
+    // worker custom domain backs preview traffic too.
+    if (host.endsWith('pages.dev')) {
+      return 'https://lawgpt-edge.hypersonic3692.workers.dev';
+    }
   }
   return '/api';
 }

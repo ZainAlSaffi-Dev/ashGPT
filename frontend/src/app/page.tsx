@@ -24,7 +24,7 @@ export default async function LandingPage() {
     <main className="grid min-h-screen place-items-center bg-parchment px-6 py-16">
       <div className="max-w-xl text-center">
         <BookMarked className="mx-auto h-10 w-10 text-accent" />
-        <h1 className="mt-6 font-serif text-4xl text-ink">LawGPT</h1>
+        <h1 className="mt-6 font-serif text-4xl text-ink">ashGPT</h1>
         <p className="mt-4 text-ink-muted">
           Your notes, with IRAC analysis, chronology diagrams, and exam practice.
           Built for law students who want quick answers backed by their own readings.

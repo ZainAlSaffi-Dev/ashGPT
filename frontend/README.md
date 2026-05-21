@@ -1,6 +1,6 @@
 # frontend/
 
-Next.js 15 (App Router) + Tailwind + Clerk + TanStack Query app for LawGPT.
+Next.js 15 (App Router) + Tailwind + Clerk + TanStack Query app for ashGPT.
 
 ## Setup
 

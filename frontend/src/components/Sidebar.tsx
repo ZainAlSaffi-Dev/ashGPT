@@ -57,7 +57,7 @@ export function Sidebar() {
     <aside className="flex h-full w-60 shrink-0 flex-col border-r border-parchment-warm bg-parchment p-4">
       <Link href="/" className="mb-6 flex items-center gap-2 font-serif text-xl text-ink">
         <BookMarked className="h-5 w-5 text-accent" />
-        LawGPT
+        ashGPT
       </Link>
 
       <nav className="flex flex-col gap-1">
