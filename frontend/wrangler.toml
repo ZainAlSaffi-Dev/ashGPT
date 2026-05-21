@@ -25,9 +25,4 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 NEXT_PUBLIC_API_BASE = "https://api.ashgpt.xyz"
-# TEMPORARY revert to the dev/test Clerk instance — the production
-# instance at clerk.ashgpt.xyz has DNS + cert but Clerk's edge is still
-# RST'ing the SDK bundle (asset propagation pending on their side).
-# Flip back to ``pk_live_Y2xlcmsuYXNoZ3B0Lnh5eiQ`` once
-# ``https://clerk.ashgpt.xyz/v1/environment`` returns JSON in a browser.
-NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_test_c29saWQtZmx5LTE0LmNsZXJrLmFjY291bnRzLmRldiQ"
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_live_Y2xlcmsuYXNoZ3B0Lnh5eiQ"
