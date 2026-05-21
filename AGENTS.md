@@ -136,7 +136,7 @@ When the user opens an old chat, `frontend/src/app/(app)/chat/[sessionId]/page.t
 
 ## Deploy
 
-**CI** (`.github/workflows/deploy.yml`): on push to `main` it runs `@cloudflare/next-on-pages` then `wrangler pages deploy .vercel/output/static --project-name=ashgpt --branch=main`, then deploys the worker. Required GH secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `NEXT_PUBLIC_API_BASE` (= `https://api.ashgpt.xyz`). Worker routes/custom domains are dashboard-managed, not `wrangler.toml`-managed, so CI does not need zone route permissions.
+**CI** (`.github/workflows/deploy.yml`): on push to `main` it installs/builds the frontend with pnpm on Node 20, switches to Node 22 for `wrangler@4.93.x`, runs `wrangler pages deploy .vercel/output/static --project-name=ashgpt --branch=main`, then deploys the worker. Required GH secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `NEXT_PUBLIC_API_BASE` (= `https://api.ashgpt.xyz`). Worker routes/custom domains are dashboard-managed, not `wrangler.toml`-managed, so CI does not need zone route permissions.
 
 **Pages dashboard build config** (also valid for manual setup):
 - Root dir: `frontend`
@@ -153,7 +153,7 @@ pnpm install --frozen-lockfile
 NEXT_PUBLIC_API_BASE=https://api.ashgpt.xyz \
 NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_live_Y2xlcmsuYXNoZ3B0Lnh5eiQ \
 pnpm dlx @cloudflare/next-on-pages@1
-npx wrangler pages deploy .vercel/output/static --project-name=ashgpt --branch=main
+pnpm dlx wrangler@4.93.0 pages deploy .vercel/output/static --project-name=ashgpt --branch=main
 ```
 
 **Backend deploy** — backend runs as a Cloudflare Container bound to the `lawgpt-edge` worker via Durable Object. `cd infra && wrangler deploy` ships both the worker and rebuilds the container from `backend/Containerfile`. Env vars + secrets are managed through `infra/wrangler.toml` `[vars]` and `wrangler secret put`.
@@ -215,6 +215,7 @@ Backend container picks up the same `[vars]` block as the worker (single `infra/
 13. **Uploads should stay on the API origin** — browser → R2 direct PUTs are fragile because bucket CORS and signed `Content-Type` must match exactly. Production uploads now use an authenticated Worker `/uploads/blob` URL; keep Dropzone on `withAuth`, clean up the placeholder file row when blob upload fails, and disable subject uploads until a `?folder=` param is validated.
 14. **Client-only giants still affect Pages Functions** — `@cloudflare/next-on-pages` can hoist dynamic client imports into the generated Pages Function modules. Mermaid is loaded from jsDelivr in `MermaidRenderer` to keep the Function bundle under Cloudflare's publish limits; don't switch it back to `import('mermaid')` without checking `_worker.js` sizes.
 15. **Dashboard Pages deploys can fail after successful asset upload** — `Failed to publish your Function. Got error: Unknown internal error occurred.` usually means the generated Pages Function publish failed, not that Next failed. First compare module sizes in `.vercel/output/static/_worker.js`; GitHub Actions direct upload with Wrangler 4 is still the source-of-truth deploy path.
+16. **Wrangler 4 publish needs Node 22** — keep the Cloudflare Pages app build pinned to Node 20 unless intentionally changing that environment, but switch GitHub Actions to Node 22 before running `wrangler@4.93.x` deploy commands. On Node 20, Wrangler exits before publishing and wrapper actions can report this as a version-detection failure.
 
 ## Backend gotchas
 
