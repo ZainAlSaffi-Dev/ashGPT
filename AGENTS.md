@@ -252,6 +252,7 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - Production auth verification: `https://ashgpt.xyz` now boots Clerk cleanly, sign-in modal opens on the production domain, and phone chat requests passed Worker auth; avoid testing Clerk on `*.ashgpt.pages.dev` previews unless that origin is explicitly added/configured in Clerk.
 - Performance/stability pass: chat streams now abort on unmount/session switch, first-session completion seeds exact message/session caches before URL promotion, per-session message queries no longer reuse previous-session data, cold history rehydrates when messages arrive, and the first-run tour lazy-loads after the app shell paints.
 - Protected-route redirect fix: unauthenticated browser visits to signed-in pages now redirect to the same-origin landing page with a sanitized `redirect_url`, avoiding the broken `accounts.ashgpt.xyz` account-portal hop while preserving deep-link intent after modal sign-in.
+- Future-session planning: added focused handoff prompts for a next-generation in-chat memory system and a browser-driven frontend animation/refresh/endpoint QA pass.
 
 ---
 
@@ -273,6 +274,100 @@ Optimization targets:
 - Make chat history loading fast and predictable. Audit `useSessions`, `useMessages`, local optimistic state, invalidations, stale times, and focus/refetch behavior.
 - Stress test core flows with browser automation: fresh visit, sign-in, sign-up redirect, send chat, stream interruption, reload during stream, back/forward navigation, session switch, history reload, and mobile viewport.
 - Do not add Redis by default. First measure client/server bottlenecks and Cloudflare/container constraints; add new infrastructure only if the profile proves in-process/browser/query caching is insufficient.
+
+---
+
+## In-chat memory handoff
+
+The current multi-turn memory path is intentionally simple: `backend/api/routes_chat.py` loads persisted session messages, `backend/src/agent/chat_memory.py` validates/trims/formats history, and `backend/src/config.py` caps history with `CHAT_HISTORY_MAX_MESSAGES = 24`. That means long chats mostly behave like a rolling window: old turns fall out, long messages are truncated, and the model can lose durable user intent, definitions, cited facts, and resolved references.
+
+Next memory workstream goal: design and implement the best practical in-chat memory system for ashGPT without sacrificing grounded legal accuracy.
+
+Prompt for the next session:
+
+```text
+You are working in /Users/zer0/Documents/projects/ashGPT. Read AGENTS.md first.
+
+Focus only on in-chat memory and long-conversation quality. Do not restart auth, routing, or visual polish work unless it directly blocks memory testing.
+
+Primary objective: replace the simple rolling 24-message memory behavior with a stronger architecture that preserves useful conversation context over long study sessions while keeping answers grounded in uploaded sources.
+
+Current starting points:
+- backend/src/agent/chat_memory.py handles validation, trimming, transcript formatting, retrieval-query packing, and follow-up rewriting.
+- backend/api/routes_chat.py loads persisted session history and emits `history_overflow` SSE events.
+- backend/src/config.py currently has `CHAT_HISTORY_MAX_MESSAGES = 24` plus per-message truncation settings.
+- backend/tests/test_chat_memory.py, backend/tests/test_multi_turn_chat.py, backend/tests/test_query_rewriter.py, and backend/tests/test_cache.py cover existing behavior.
+
+Investigate and design:
+1. Map the full memory flow from persisted DB rows -> prepared history -> query rewrite -> retrieval -> synthesis -> verification -> persisted assistant message.
+2. Identify what context must be preserved for a law-study assistant: user goals, jurisdiction/course/module, defined shorthand, cited authorities already discussed, issue framing, prior conclusions, unresolved follow-ups, and source-grounding constraints.
+3. Compare options: rolling window, hierarchical summaries, episodic facts, retrieval over prior turns, source-aware memory snippets, and hybrid recent-window + durable summary.
+4. Design a deterministic memory contract: what is stored, when it updates, how it is cited or explicitly marked as conversation memory, how stale/incorrect memory is corrected, and how it avoids inventing legal authority.
+5. Decide whether schema changes are needed. If so, remember this project has no proper Alembic yet; add idempotent inline migrations in backend/src/storage/db.py.
+6. Preserve privacy and namespace isolation. Memory must be per user/session unless a deliberate cross-session study profile is explicitly designed and accepted.
+
+Implementation expectations:
+- Prefer a hybrid design: recent verbatim turns + compact running summary + structured memory facts + retrieval over prior turns only if profiling justifies it.
+- Make memory updates observable in tests. Add examples for long chats where early constraints still affect later answers after >24 turns.
+- Keep `history_overflow` or replace it with a clearer telemetry event so the frontend can explain when memory has been compressed.
+- Add eval-style tests for coreference, corrections ("actually ignore that"), jurisdiction changes, and source-grounding boundaries.
+- Measure prompt size and latency before/after. Do not add Redis/vector infrastructure for memory unless local DB/browser/query approaches are proven insufficient.
+
+Deliverables:
+- Architecture note or ADR for the chosen memory model.
+- Code + tests implementing the first production-ready version.
+- Short report with behavior examples, token/latency impact, and known limitations.
+- Updated AGENTS.md with any durable memory gotchas.
+```
+
+---
+
+## Frontend animation QA handoff
+
+Run this as a dedicated browser session after the current performance/routing work is deployed. Use Chrome or Browser tooling with real screenshots and interaction timing; avoid relying only on static code review.
+
+Prompt for the next session:
+
+```text
+You are working in /Users/zer0/Documents/projects/ashGPT. Read AGENTS.md first.
+
+Focus only on frontend animation smoothness, refresh behavior, endpoint health, and browser-observed user-flow reliability. Do not redesign product UI or backend agent behavior during this pass.
+
+Primary objective: verify the app feels fluid and deterministic in a real browser: animations do not jank, route transitions do not flicker, refreshes land on the same logical page, and all visible flows hit healthy endpoints.
+
+Required browser matrix:
+- Production custom domain `https://ashgpt.xyz` first. Use preview URLs only for deployment isolation; do not use pages.dev for Clerk auth conclusions unless that origin is configured.
+- Desktop viewport and mobile viewport.
+- Signed-out and signed-in states if an auth session is available. Do not ask for or handle credentials; stop at credential boundaries unless the user takes over.
+
+Flows to test:
+1. Fresh visit to `/`, Clerk boot, sign-in/sign-up modal open/close animations.
+2. Signed-out deep link to `/chat` and `/chat/<id>`: should stay same-origin and preserve `redirect_url`.
+3. App shell navigation: `/chat`, `/library`, `/exam`, `/settings`, sidebar open/close, mobile drawer, back/forward.
+4. Chat idle refresh and session-history reload. Confirm no wrong-session message flash.
+5. First chat send, existing chat send, stream node trace, stream completion URL promotion, and reload after completion.
+6. New chat button while idle and while busy. Busy state should prevent route jumps.
+7. Citation chips, popover hover/pin, source panel row interactions, mobile bottom sheet.
+8. Library upload UI, file list polling states, delete dialog animations, and `/library?file=` deep-link highlight.
+9. Exam page empty-library and ready-library states.
+10. Guided tour/onboarding: confirm lazy load does not block chat shell; modal animation is smooth.
+
+Endpoint checks:
+- Browser/network checks for duplicate `sessions`, `messages`, `files`, `users/me`, and `/chat` requests on load, focus, route switch, and reload.
+- Confirm `/chat` SSE errors are surfaced as stream errors, not mistaken for page-level auth failures.
+- Confirm no repeated Clerk proxy failures under `https://ashgpt.xyz/__clerk`.
+
+Quality bar:
+- Capture before/after notes with exact URLs, viewport size, and route-change count where relevant.
+- Record animation defects with screenshots or short descriptions tied to component names/files.
+- Prefer small, targeted fixes: animation duration/easing, `AnimatePresence` mode, layout stability, scroll behavior, cache invalidation, and query gating.
+- Run `cd frontend && pnpm typecheck && pnpm test && pnpm build` after changes.
+
+Deliverables:
+- Browser QA report with pass/fail per flow.
+- Code fixes and tests for any confirmed regressions.
+- Updated AGENTS.md if a new animation/routing gotcha is discovered.
+```
 
 ---
 
