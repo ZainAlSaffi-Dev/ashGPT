@@ -52,4 +52,4 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: '4'
           command: deploy
-          workingDirectory: infra/worker
+          workingDirectory: infra

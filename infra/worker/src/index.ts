@@ -22,6 +22,8 @@ export interface Env {
   DB: D1Database;
   CLERK_ISSUER: string;
   CLERK_SECRET_KEY: string;
+  CLERK_FAPI?: string;
+  CLERK_PROXY_URL?: string;
   CORS_ORIGINS?: string;
   // Backend container secrets — forwarded into the container via envVars.
   DATABASE_URL?: string;
@@ -34,6 +36,11 @@ export interface Env {
   R2_SECRET_ACCESS_KEY?: string;
   R2_ACCOUNT_ID?: string;
   R2_BUCKET?: string;
+}
+
+const CLERK_PROXY_PATH = '/__clerk';
+function matchesClerkProxyPath(pathname: string): boolean {
+  return pathname === CLERK_PROXY_PATH || pathname.startsWith(`${CLERK_PROXY_PATH}/`);
 }
 
 function corsHeaders(env: Env, origin: string | null): Record<string, string> {
@@ -121,6 +128,10 @@ export default {
     const url = new URL(req.url);
     const origin = req.headers.get('origin');
 
+    if (matchesClerkProxyPath(url.pathname)) {
+      return proxyToClerkFrontendApi(req, env);
+    }
+
     if (req.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders(env, origin) });
     }
@@ -189,6 +200,34 @@ export default {
     );
   },
 };
+
+function getClientIp(req: Request): string {
+  return (
+    req.headers.get('CF-Connecting-IP') ??
+    req.headers.get('X-Real-IP') ??
+    req.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ??
+    ''
+  );
+}
+
+async function proxyToClerkFrontendApi(req: Request, env: Env): Promise<Response> {
+  if (!env.CLERK_SECRET_KEY) {
+    return Response.json({ error: 'missing Clerk proxy secret' }, { status: 500 });
+  }
+
+  const requestUrl = new URL(req.url);
+  const fapiBase = env.CLERK_FAPI ?? 'https://frontend-api.clerk.dev';
+  const proxyUrl = (env.CLERK_PROXY_URL ?? `${requestUrl.origin}${CLERK_PROXY_PATH}`).replace(/\/$/, '');
+  const targetUrl = req.url.replace(proxyUrl, fapiBase);
+  const proxyReq = new Request(req, {
+    redirect: 'manual',
+  });
+  proxyReq.headers.set('Clerk-Proxy-Url', proxyUrl);
+  proxyReq.headers.set('Clerk-Secret-Key', env.CLERK_SECRET_KEY);
+  proxyReq.headers.set('X-Forwarded-For', getClientIp(req));
+
+  return fetch(targetUrl, proxyReq);
+}
 
 async function warmContainer(env: Env): Promise<unknown> {
   // Forward an unauthenticated GET to the container's /internal/warm route.

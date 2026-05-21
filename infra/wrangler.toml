@@ -2,6 +2,12 @@ name = "lawgpt-edge"
 main = "worker/src/index.ts"
 compatibility_date = "2026-01-01"
 compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+routes = [
+  { pattern = "ashgpt.xyz/__clerk", zone_name = "ashgpt.xyz" },
+  { pattern = "ashgpt.xyz/__clerk/*", zone_name = "ashgpt.xyz" },
+]
 
 # Workers Logs: surface console.log/error from the Worker in the dashboard
 # (and `wrangler tail`). invocation_logs adds the request/response summary.
@@ -65,6 +71,8 @@ new_sqlite_classes = ["LawgptBackend"]
 # Production Clerk instance on the custom domain ``clerk.ashgpt.xyz``.
 # JWKS is derived as ``<CLERK_ISSUER>/.well-known/jwks.json``.
 CLERK_ISSUER = "https://clerk.ashgpt.xyz"
+CLERK_FAPI = "https://frontend-api.clerk.dev"
+CLERK_PROXY_URL = "https://ashgpt.xyz/__clerk"
 CORS_ORIGINS = "https://ashgpt.xyz,https://www.ashgpt.xyz,https://ashgpt.pages.dev,http://localhost:3000"
 R2_BUCKET = "lawgpt-uploads"
 R2_ACCOUNT_ID = "b7fc20f146b05722922360bd1310aa3a"
