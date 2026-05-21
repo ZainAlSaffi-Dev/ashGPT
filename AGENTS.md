@@ -255,6 +255,7 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - Protected-route redirect fix: unauthenticated browser visits to signed-in pages now redirect to the same-origin landing page with a sanitized `redirect_url`, avoiding the broken `accounts.ashgpt.xyz` account-portal hop while preserving deep-link intent after modal sign-in.
 - Future-session planning: added focused handoff prompts for a next-generation in-chat memory system and a browser-driven frontend animation/refresh/endpoint QA pass.
 - In-chat memory v1: backend now keeps the latest 24 messages verbatim, compresses older persisted turns into per-session `conversation_memory`, feeds that into router/retrieval/synthesis with explicit grounding boundaries, and emits `memory` SSE telemetry when compression occurs.
+- Project-scoped library design: added `docs/project_scoped_library_system_design.md` mapping current user/session/upload persistence and the target project/folder retrieval architecture.
 
 ---
 
@@ -290,6 +291,14 @@ Grounding rule: compressed memory is session context only. It must never be cite
 Telemetry: long chats emit the existing `history_overflow` event plus a `memory` SSE event containing `memory_compressed`, `compressed_turns`, `recent_messages`, `memory_fact_count`, `memory_summary_chars`, and `truncated_messages`.
 
 Design note: see `docs/in_chat_memory_adr.md`. No schema change was added for v1; memory is rebuilt from per-session rows to avoid stale persisted summaries.
+
+---
+
+## Project-scoped library design
+
+Use `docs/project_scoped_library_system_design.md` as the starting point for the next major library/session/retrieval workstream. The current app persists users, sessions, messages, files, chunks, blobs, and vectors per `user_id`, but it does not yet have first-class `project_id` / `folder_id` scope.
+
+The intended architecture is `user -> project -> folder/file -> session/message -> retrieval scope`. Vector namespace stays `user_id` for hard tenant isolation; project/folder/file filtering should be metadata filters stamped onto files, chunks, vector rows, sessions, messages, and answer-cache keys. Explicit empty project/folder/file scopes must not fall back to the whole library.
 
 ---
 
