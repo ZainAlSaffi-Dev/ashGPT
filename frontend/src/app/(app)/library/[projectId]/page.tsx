@@ -19,6 +19,7 @@ import {
 
 import { Dropzone } from '@/components/Dropzone';
 import { LibraryFileList } from '@/components/library/LibraryFileList';
+import { ProjectSessionsPanel } from '@/components/library/ProjectSessionsPanel';
 import { Button } from '@/components/ui/Button';
 import { SkeletonList } from '@/components/ui/Skeleton';
 import { createFolder } from '@/lib/api';
@@ -226,6 +227,8 @@ export default function ProjectWorkspacePage() {
         </aside>
 
         <main className="min-w-0">
+          <ProjectSessionsPanel projectId={project.id} />
+
           <section>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-2">

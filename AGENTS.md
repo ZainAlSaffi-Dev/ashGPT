@@ -265,6 +265,7 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - Project-scoped library hardening: fixed landing post-login navigation, scoped cache invalidation, legacy-session scope mismatch rejection, recursive folder scope cleanup, delete cache invalidation, and removed CI-owned Cloudflare routes so main deploys can proceed with account-level tokens.
 - Project workspace revamp: `/library` is now a subject overview, subjects open `/library/[projectId]` workspaces with folder-scoped files/uploads/chat links, and the sidebar shows nested subject links.
 - Workspace navigation polish: route transitions are enter-only and the app shell resets its internal scroll container on pathname changes so subject workspace pages open at the top instead of stacking below the previous page.
+- Project workspace sessions: subject pages now show a scoped recent-chats panel with resume links and a new subject-chat action backed by `useSessions({ projectId })`.
 
 ---
 
