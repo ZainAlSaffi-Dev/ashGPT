@@ -36,6 +36,10 @@ export function useFiles() {
     // Fallback so an in-flight file that never reaches a terminal status
     // still gets revalidated on revisit, instead of polling forever.
     staleTime: 5 * 60_000,
+    // Tab nav must feel instant — keep cached files on screen and
+    // revalidate in the background instead of flashing the skeleton.
+    refetchOnMount: false,
+    placeholderData: keepPreviousData,
     refetchInterval: (query) => {
       const data = query.state.data;
       if (!data || data.length === 0) return false;
@@ -58,6 +62,7 @@ export function useSessions() {
     // and gets invalidated on create/delete.
     staleTime: 60_000,
     refetchOnWindowFocus: false,
+    refetchOnMount: false,
     placeholderData: keepPreviousData,
   });
 }
@@ -75,6 +80,9 @@ export function useMessages(sessionId: string | null | undefined) {
     // assistant message is committed server-side.
     staleTime: 60_000,
     gcTime: 10 * 60_000,
+    // Reopening an old chat must paint from cache — no spinner flash.
+    refetchOnMount: false,
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -126,6 +134,8 @@ export function useCurrentUser() {
     enabled: authReady,
     queryFn: () => withAuth(getToken, (token) => getMe(token)),
     staleTime: 5 * 60_000,
+    refetchOnMount: false,
+    placeholderData: keepPreviousData,
   });
 }
 

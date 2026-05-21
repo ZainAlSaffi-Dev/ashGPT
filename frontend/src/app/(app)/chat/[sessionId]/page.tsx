@@ -1,11 +1,9 @@
 'use client';
 
-import { useQuery } from '@tanstack/react-query';
-import { useAuth } from '@clerk/nextjs';
 import { use } from 'react';
 
 import { ChatSurface } from '@/components/ChatSurface';
-import { listMessages } from '@/lib/api';
+import { useMessages } from '@/lib/queries';
 import type { ChatTurn } from '@/lib/useChat';
 
 export const runtime = 'edge';
@@ -16,24 +14,15 @@ interface PageProps {
 
 export default function ChatSessionPage({ params }: PageProps) {
   const { sessionId } = use(params);
-  const { getToken } = useAuth();
 
-  const messagesQuery = useQuery({
-    queryKey: ['messages', sessionId],
-    queryFn: async () => {
-      const token = (await getToken()) ?? undefined;
-      return listMessages(sessionId, token);
-    },
-  });
+  // ``useMessages`` is auth-gated + persisted to localStorage, so revisits
+  // paint from cache immediately. ``data`` is undefined only on the very
+  // first uncached visit; in that case we still mount ChatSurface with no
+  // turns so the composer is interactive while the messages stream in.
+  const messagesQuery = useMessages(sessionId);
+  const messages = messagesQuery.data;
 
-  if (messagesQuery.isLoading) {
-    return (
-      <div className="mx-auto flex h-full max-w-4xl items-center justify-center px-6 py-6 text-ink-muted">
-        Loading conversation…
-      </div>
-    );
-  }
-  if (messagesQuery.isError) {
+  if (messagesQuery.isError && !messages) {
     return (
       <div className="mx-auto max-w-4xl px-6 py-6 text-sm text-red-700">
         Couldn’t load this conversation. Try refreshing or starting a new chat.
@@ -41,7 +30,7 @@ export default function ChatSessionPage({ params }: PageProps) {
     );
   }
 
-  const turns: ChatTurn[] = (messagesQuery.data ?? []).map((m) => ({
+  const turns: ChatTurn[] = (messages ?? []).map((m) => ({
     id: m.id,
     role: m.role,
     content: m.content,
