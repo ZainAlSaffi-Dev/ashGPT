@@ -1,29 +1,51 @@
-import { SignInButton, SignedIn, SignedOut } from '@clerk/nextjs';
-import { redirect } from 'next/navigation';
-import { auth } from '@clerk/nextjs/server';
+'use client';
+
+import { useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { SignInButton, SignedIn, SignedOut, useAuth } from '@clerk/nextjs';
+import { motion } from 'framer-motion';
 import { BookMarked } from 'lucide-react';
 
-// Landing page calls ``auth()``, which needs a live request — opt out of
-// static prerender so the build does not require Clerk secrets.
-export const dynamic = 'force-dynamic';
-export const runtime = 'edge';
+import { Button } from '@/components/ui/Button';
 
-export default async function LandingPage() {
-  // ``auth()`` throws without Clerk env vars; we treat that as signed-out so
-  // the page still renders during CI / no-secret builds.
-  let userId: string | null = null;
-  try {
-    const result = await auth();
-    userId = result.userId ?? null;
-  } catch {
-    userId = null;
-  }
-  if (userId) redirect('/chat');
+/** Landing page is now fully client-rendered.
+ *
+ *  The previous version called Clerk's server-side ``auth()`` in an edge
+ *  RSC. Right after sign-in / sign-up, the redirected request could arrive
+ *  with a session token whose JWKS hadn't been cached yet — Clerk would
+ *  throw inside the RSC, the App Router rendered the bare "Application
+ *  error: a server-side exception has occurred" page (digest only), and
+ *  the user had to refresh.
+ *
+ *  Moving the auth read to ``useAuth`` (client hook) sidesteps that
+ *  entire race: there is no server render to fail, Clerk hydrates on the
+ *  client at its own pace, and the redirect happens once we know the
+ *  user's signed-in state for real.
+ */
+export default function LandingPage() {
+  const router = useRouter();
+  const { isLoaded, isSignedIn } = useAuth();
+
+  useEffect(() => {
+    if (isLoaded && isSignedIn) router.replace('/chat');
+  }, [isLoaded, isSignedIn, router]);
 
   return (
     <main className="grid min-h-screen place-items-center bg-parchment px-6 py-16">
-      <div className="max-w-xl text-center">
-        <BookMarked className="mx-auto h-10 w-10 text-accent" />
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4, ease: 'easeOut' }}
+        className="max-w-xl text-center"
+      >
+        <motion.div
+          initial={{ scale: 0.8, rotate: -10 }}
+          animate={{ scale: 1, rotate: 0 }}
+          transition={{ type: 'spring', stiffness: 220, damping: 18, delay: 0.05 }}
+          className="mx-auto inline-flex"
+        >
+          <BookMarked className="h-10 w-10 text-accent" />
+        </motion.div>
         <h1 className="mt-6 font-serif text-4xl text-ink">ashGPT</h1>
         <p className="mt-4 text-ink-muted">
           Your notes, with IRAC analysis, chronology diagrams, and exam practice.
@@ -32,21 +54,22 @@ export default async function LandingPage() {
         <div className="mt-8 flex items-center justify-center gap-3">
           <SignedOut>
             <SignInButton mode="modal">
-              <button className="rounded-md bg-accent px-5 py-2 text-parchment shadow hover:bg-accent-hover">
-                Sign in
-              </button>
+              <Button size="lg">Sign in</Button>
             </SignInButton>
           </SignedOut>
           <SignedIn>
-            <a
-              href="/chat"
-              className="rounded-md bg-accent px-5 py-2 text-parchment shadow hover:bg-accent-hover"
-            >
-              Open the app
-            </a>
+            <Button size="lg" asChild>
+              <a href="/chat">Open the app</a>
+            </Button>
           </SignedIn>
         </div>
-      </div>
+        {/* While Clerk is hydrating (or while we're mid-redirect for a
+            signed-in user) show a calm spinner instead of flashing the
+            sign-in button. */}
+        {!isLoaded && (
+          <p className="mt-6 text-xs text-ink-soft">Loading…</p>
+        )}
+      </motion.div>
     </main>
   );
 }

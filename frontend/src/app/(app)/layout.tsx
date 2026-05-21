@@ -2,11 +2,15 @@ import { AppShell } from '@/components/AppShell';
 import { Providers } from '@/components/Providers';
 import { WelcomeTour } from '@/components/onboarding/WelcomeTour';
 
-// Authenticated routes must not be statically prerendered — Clerk needs a
-// live request context to resolve the user, and we don't ship a Clerk key
-// at build time. ``force-dynamic`` opts the whole ``(app)`` group out of
-// SSG/ISR and into per-request rendering.
-export const dynamic = 'force-dynamic';
+// Edge runtime so Clerk's middleware/cookies are available, but no
+// ``dynamic = 'force-dynamic'``: the layout itself never reads
+// request-scoped state (the Clerk hooks inside ``Providers`` and
+// ``AppShell`` are client-side). Marking it dynamic forced Next to
+// invalidate the whole layout shell on every sibling-route nav, which
+// re-evaluated ``Providers`` and briefly dropped the persisted query
+// cache — visible as the history sidebar reloading every time you
+// switched tabs. Letting Next reuse the layout means navigating between
+// /chat, /library, /exam, /settings is a pure client-side segment swap.
 export const runtime = 'edge';
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
