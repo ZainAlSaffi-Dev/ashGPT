@@ -1,5 +1,6 @@
 import { AppShell } from '@/components/AppShell';
 import { Providers } from '@/components/Providers';
+import { WelcomeTour } from '@/components/onboarding/WelcomeTour';
 
 // Authenticated routes must not be statically prerendered — Clerk needs a
 // live request context to resolve the user, and we don't ship a Clerk key
@@ -12,6 +13,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <Providers>
       <AppShell>{children}</AppShell>
+      <WelcomeTour />
     </Providers>
   );
 }

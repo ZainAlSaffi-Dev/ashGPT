@@ -1,14 +1,24 @@
 'use client';
 
-import { useEffect, useMemo, useRef } from 'react';
-import { Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
+import { FileStack, Trash2 } from 'lucide-react';
 import { useAuth } from '@clerk/nextjs';
 import { useSearchParams } from 'next/navigation';
 
 import { Dropzone } from '@/components/Dropzone';
 import { OnboardingChecklist } from '@/components/OnboardingChecklist';
+import { Button } from '@/components/ui/Button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from '@/components/ui/Dialog';
+import { SkeletonList } from '@/components/ui/Skeleton';
 import { deleteFile } from '@/lib/api';
 import { useFiles, useInvalidateFiles, useOnboarding } from '@/lib/queries';
+import type { FileMeta } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 function fileSlug(name: string): string {
@@ -25,9 +35,9 @@ export default function LibraryPage() {
 
   const files = filesQuery.data ?? [];
   const listRef = useRef<HTMLUListElement | null>(null);
-  // Only scroll once per (file param, file load) so the user can scroll
-  // away after landing.
   const didScrollRef = useRef<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<FileMeta | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const matchId = useMemo(() => {
     if (!targetFile || !files.length) return null;
@@ -40,7 +50,6 @@ export default function LibraryPage() {
   useEffect(() => {
     if (!matchId || didScrollRef.current === matchId) return;
     didScrollRef.current = matchId;
-    // Defer to the next frame so the list has mounted before we scroll.
     requestAnimationFrame(() => {
       document
         .getElementById(`file-${matchId}`)
@@ -48,20 +57,32 @@ export default function LibraryPage() {
     });
   }, [matchId]);
 
-  const onDelete = async (id: string) => {
-    if (!confirm('Delete this file and all its chunks? This cannot be undone.')) return;
-    const token = (await getToken()) ?? undefined;
-    await deleteFile(id, token);
-    await invalidateFiles();
+  const confirmDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try {
+      const token = (await getToken()) ?? undefined;
+      await deleteFile(pendingDelete.id, token);
+      await invalidateFiles();
+    } finally {
+      setDeleting(false);
+      setPendingDelete(null);
+    }
   };
 
   return (
     <div className="mx-auto max-w-4xl px-6 py-8">
-      <h1 className="font-serif text-2xl text-ink">Library</h1>
-      <p className="mt-1 text-sm text-ink-muted">
-        Drop your readings, lecture slides, and notes. They&apos;ll be chunked,
-        embedded, and made searchable for chat + exam generation.
-      </p>
+      <motion.div
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.2 }}
+      >
+        <h1 className="font-serif text-2xl text-ink">Library</h1>
+        <p className="mt-1 text-sm text-ink-muted">
+          Drop your readings, lecture slides, and notes. They&apos;ll be chunked,
+          embedded, and made searchable for chat + exam generation.
+        </p>
+      </motion.div>
 
       {!onboarding.isComplete && (
         <div className="mt-6">
@@ -80,57 +101,119 @@ export default function LibraryPage() {
         </p>
       )}
       {filesQuery.isLoading ? (
-        <p className="mt-3 text-sm text-ink-muted">Loading…</p>
+        <SkeletonList rows={3} className="mt-3" />
       ) : files.length === 0 ? (
-        <p className="mt-3 text-sm text-ink-muted">No files yet.</p>
+        <EmptyFiles />
       ) : (
         <ul
           ref={listRef}
           className="mt-3 divide-y divide-parchment-warm rounded-lg border border-parchment-warm bg-parchment"
         >
-          {files.map((f) => {
-            const isHit = matchId === f.id;
-            return (
-              <li
-                key={f.id}
-                id={`file-${f.id}`}
-                data-file-slug={fileSlug(f.name)}
-                className={cn(
-                  'flex scroll-mt-20 items-center justify-between px-4 py-3 transition',
-                  isHit && 'bg-accent/10 ring-1 ring-accent',
-                )}
-              >
-                <div>
-                  <p className="text-ink">{f.name}</p>
-                  <p className="text-xs text-ink-soft">
-                    {f.doc_type}
-                    {f.week ? ` · ${f.week}` : ''}
-                    {' · '}
-                    {f.chunk_count} chunk{f.chunk_count === 1 ? '' : 's'}
-                    {' · '}
-                    <span
-                      className={cn(
-                        f.status === 'ready' && 'text-accent',
-                        f.status === 'failed' && 'text-red-600',
-                      )}
-                    >
-                      {f.status}
-                    </span>
-                  </p>
-                  {f.error && <p className="text-xs text-red-600">{f.error}</p>}
-                </div>
-                <button
-                  onClick={() => onDelete(f.id)}
-                  className="text-ink-muted hover:text-red-600"
-                  aria-label={`Delete ${f.name}`}
+          <AnimatePresence initial={false}>
+            {files.map((f) => {
+              const isHit = matchId === f.id;
+              return (
+                <motion.li
+                  key={f.id}
+                  layout
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, x: 12, height: 0, padding: 0 }}
+                  transition={{ duration: 0.2 }}
+                  id={`file-${f.id}`}
+                  data-file-slug={fileSlug(f.name)}
+                  className={cn(
+                    'flex scroll-mt-20 items-center justify-between px-4 py-3',
+                    isHit && 'bg-accent/10 ring-1 ring-accent',
+                  )}
                 >
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              </li>
-            );
-          })}
+                  <div>
+                    <p className="text-ink">{f.name}</p>
+                    <p className="text-xs text-ink-soft">
+                      {f.doc_type}
+                      {f.week ? ` · ${f.week}` : ''}
+                      {' · '}
+                      {f.chunk_count} chunk{f.chunk_count === 1 ? '' : 's'}
+                      {' · '}
+                      <span
+                        className={cn(
+                          f.status === 'ready' && 'text-accent',
+                          f.status === 'failed' && 'text-red-600',
+                        )}
+                      >
+                        {f.status}
+                      </span>
+                    </p>
+                    {f.error && <p className="text-xs text-red-600">{f.error}</p>}
+                  </div>
+                  <button
+                    onClick={() => setPendingDelete(f)}
+                    className="text-ink-muted transition hover:text-red-600"
+                    aria-label={`Delete ${f.name}`}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </motion.li>
+              );
+            })}
+          </AnimatePresence>
         </ul>
       )}
+
+      <Dialog
+        open={!!pendingDelete}
+        onOpenChange={(o) => !o && setPendingDelete(null)}
+      >
+        <DialogContent open={!!pendingDelete}>
+          <DialogTitle className="font-serif text-lg text-ink">Delete file?</DialogTitle>
+          <DialogDescription className="mt-2 text-sm text-ink-muted">
+            “{pendingDelete?.name}” and all its chunks will be removed. This can&apos;t be undone.
+          </DialogDescription>
+          <div className="mt-6 flex justify-end gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setPendingDelete(null)}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={confirmDelete}
+              disabled={deleting}
+            >
+              {deleting ? 'Deleting…' : 'Delete'}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
+  );
+}
+
+function EmptyFiles() {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25 }}
+      className="mt-3 rounded-xl border border-dashed border-parchment-warm bg-parchment px-6 py-10 text-center"
+    >
+      <motion.div
+        animate={{ y: [0, -4, 0] }}
+        transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
+        className="mx-auto inline-flex"
+      >
+        <FileStack className="h-8 w-8 text-accent" />
+      </motion.div>
+      <p className="mt-3 font-serif text-lg text-ink">No files yet</p>
+      <p className="mx-auto mt-1 max-w-sm text-sm text-ink-muted">
+        Drop a PDF, DOCX, image, or markdown file above to get started. Larger
+        readings chunk in the background — you can keep using the rest of the
+        app while they process.
+      </p>
+    </motion.div>
   );
 }

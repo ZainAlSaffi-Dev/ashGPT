@@ -2,15 +2,37 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { usePathname } from 'next/navigation';
-import { UserButton } from '@clerk/nextjs';
+import { useAuth, UserButton } from '@clerk/nextjs';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Menu } from 'lucide-react';
+import { Menu, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 
+import { RouteTransition } from './ui/RouteTransition';
 import { Sidebar } from './Sidebar';
+
+const SIDEBAR_HIDDEN_KEY = 'ashgpt:sidebar-hidden';
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [desktopHidden, setDesktopHidden] = useState(false);
   const pathname = usePathname();
+  const { getToken } = useAuth();
+
+  // Hydrate persisted desktop sidebar state.
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(SIDEBAR_HIDDEN_KEY);
+      if (stored === '1') setDesktopHidden(true);
+    } catch {
+      // localStorage may be unavailable (Safari private mode); ignore.
+    }
+  }, []);
+
+  // Warm Clerk's in-memory token as soon as the shell mounts so the first
+  // round of useQuery calls never races sign-in hydration. Cheap belt-and-
+  // braces alongside ``useAuthReady``.
+  useEffect(() => {
+    void getToken().catch(() => null);
+  }, [getToken]);
 
   // Close the drawer whenever the route changes so navigating between
   // pages on mobile doesn't leave the panel sitting open over the new
@@ -42,12 +64,29 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const close = useCallback(() => setMobileOpen(false), []);
 
+  const toggleDesktopSidebar = useCallback(() => {
+    setDesktopHidden((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(SIDEBAR_HIDDEN_KEY, next ? '1' : '0');
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }, []);
+
   return (
     <div className="flex h-screen">
-      {/* Desktop sidebar — static column at md+. */}
-      <div className="hidden md:flex">
+      {/* Desktop sidebar — animated collapse on md+. */}
+      <motion.div
+        className="hidden overflow-hidden md:flex"
+        initial={false}
+        animate={{ width: desktopHidden ? 0 : 240 }}
+        transition={{ type: 'spring', stiffness: 320, damping: 34 }}
+      >
         <Sidebar />
-      </div>
+      </motion.div>
 
       {/* Mobile drawer + backdrop. */}
       <AnimatePresence>
@@ -90,11 +129,26 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           >
             <Menu className="h-5 w-5" />
           </button>
+          <button
+            type="button"
+            onClick={toggleDesktopSidebar}
+            className="hidden rounded p-1.5 text-ink-muted transition hover:bg-parchment-warm hover:text-ink md:inline-flex"
+            aria-label={desktopHidden ? 'Show sidebar' : 'Hide sidebar'}
+            title={desktopHidden ? 'Show sidebar' : 'Hide sidebar'}
+          >
+            {desktopHidden ? (
+              <PanelLeftOpen className="h-4 w-4" />
+            ) : (
+              <PanelLeftClose className="h-4 w-4" />
+            )}
+          </button>
           <div className="ml-auto">
             <UserButton />
           </div>
         </header>
-        <main className="flex-1 overflow-y-auto">{children}</main>
+        <main className="flex-1 overflow-y-auto">
+          <RouteTransition>{children}</RouteTransition>
+        </main>
       </div>
     </div>
   );
