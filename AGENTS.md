@@ -262,6 +262,7 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - Project-scoped library design: added `docs/project_scoped_library_system_design.md` mapping current user/session/upload persistence and the target project/folder retrieval architecture.
 - Project-scoped library v1: added project/folder persistence and CRUD, scoped file upload/list/move, scoped sessions/messages/chat snapshots, project/folder/file retrieval filters across dense + BM25, source metadata rehydration, and a basic frontend subject/folder library selector with scoped upload/chat plumbing.
 - Project-scoped library hardening: fixed landing post-login navigation, scoped cache invalidation, legacy-session scope mismatch rejection, recursive folder scope cleanup, delete cache invalidation, and removed CI-owned Cloudflare routes so main deploys can proceed with account-level tokens.
+- Project workspace revamp: `/library` is now a subject overview, subjects open `/library/[projectId]` workspaces with folder-scoped files/uploads/chat links, and the sidebar shows nested subject links.
 
 ---
 

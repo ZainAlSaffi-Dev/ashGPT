@@ -7,6 +7,8 @@ import { AnimatePresence, motion } from 'framer-motion';
 import type { Route } from 'next';
 import {
   BookMarked,
+  BookOpen,
+  ChevronDown,
   FileStack,
   GraduationCap,
   MessageSquare,
@@ -24,8 +26,8 @@ import {
 } from '@/components/ui/Dialog';
 import { Button } from '@/components/ui/Button';
 import { SkeletonList } from '@/components/ui/Skeleton';
-import { useDeleteSession, useSessions } from '@/lib/queries';
-import type { SessionSummary } from '@/lib/types';
+import { useDeleteSession, useProjects, useSessions } from '@/lib/queries';
+import type { Project, SessionSummary } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 const nav = [
@@ -35,13 +37,22 @@ const nav = [
   { href: '/settings', label: 'Settings', Icon: Settings },
 ] as const;
 
+const subjectPalette = ['#7a3b2e', '#315f72', '#596b3a', '#6f4d7a', '#8a6536'];
+
+function subjectColor(project: Project, index: number) {
+  return project.color || subjectPalette[index % subjectPalette.length];
+}
+
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const sessionsQuery = useSessions();
+  const projectsQuery = useProjects();
   const deleteSession = useDeleteSession();
 
   const [pendingDelete, setPendingDelete] = useState<SessionSummary | null>(null);
+  const [subjectsOpen, setSubjectsOpen] = useState(true);
+  const projects = projectsQuery.data ?? [];
 
   const confirmDelete = () => {
     if (!pendingDelete) return;
@@ -101,6 +112,43 @@ export function Sidebar() {
         })}
       </nav>
 
+      <div className="mt-4">
+        <button
+          type="button"
+          onClick={() => setSubjectsOpen((open) => !open)}
+          className="flex w-full items-center justify-between rounded-md px-3 py-2 text-xs font-semibold uppercase tracking-wide text-ink-soft transition hover:bg-parchment-warm hover:text-ink"
+          aria-expanded={subjectsOpen}
+        >
+          <span className="inline-flex items-center gap-2">
+            <BookOpen className="h-3.5 w-3.5" />
+            Subjects
+          </span>
+          <ChevronDown
+            className={cn(
+              'h-3.5 w-3.5 transition-transform',
+              subjectsOpen && 'rotate-180',
+            )}
+          />
+        </button>
+        <AnimatePresence initial={false}>
+          {subjectsOpen && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.16 }}
+              className="overflow-hidden"
+            >
+              <SubjectLinks
+                projects={projects}
+                activePath={pathname}
+                isLoading={projectsQuery.isLoading}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
       <div className="mt-6 flex items-center justify-between">
         <span className="text-xs font-semibold uppercase tracking-wide text-ink-soft">
           History
@@ -147,6 +195,59 @@ export function Sidebar() {
         </DialogContent>
       </Dialog>
     </aside>
+  );
+}
+
+function SubjectLinks({
+  projects,
+  activePath,
+  isLoading,
+}: {
+  projects: Project[];
+  activePath: string;
+  isLoading: boolean;
+}) {
+  if (isLoading) {
+    return <SkeletonList rows={3} className="mt-2" />;
+  }
+  if (!projects.length) {
+    return (
+      <Link
+        href="/library"
+        className="mt-2 flex items-center gap-2 rounded-md px-3 py-2 text-sm text-ink-muted transition hover:bg-parchment-warm hover:text-ink"
+      >
+        <Plus className="h-3.5 w-3.5" />
+        Create subject
+      </Link>
+    );
+  }
+  return (
+    <ul className="mt-1 flex max-h-44 flex-col gap-0.5 overflow-y-auto pr-1">
+      {projects.map((project, index) => {
+        const href = `/library/${project.id}` as Route;
+        const active = activePath === href;
+        return (
+          <li key={project.id}>
+            <Link
+              href={href}
+              className={cn(
+                'flex items-center gap-2 rounded-md px-3 py-1.5 text-sm transition',
+                active
+                  ? 'bg-parchment-warm text-ink'
+                  : 'text-ink-muted hover:bg-parchment-warm hover:text-ink',
+              )}
+              title={project.name}
+            >
+              <span
+                className="h-2.5 w-2.5 shrink-0 rounded-full"
+                style={{ backgroundColor: subjectColor(project, index) }}
+              />
+              <span className="truncate">{project.name}</span>
+            </Link>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 

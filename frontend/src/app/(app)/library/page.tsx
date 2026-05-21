@@ -1,115 +1,65 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
-import { FileStack, FolderPlus, Plus, Trash2 } from 'lucide-react';
-import { useAuth } from '@clerk/nextjs';
+import { useMemo, useState } from 'react';
+import Link from 'next/link';
+import type { Route } from 'next';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { useAuth } from '@clerk/nextjs';
 import { useQueryClient } from '@tanstack/react-query';
+import { motion } from 'framer-motion';
+import {
+  BookOpen,
+  FileStack,
+  FolderOpen,
+  MessageSquare,
+  Plus,
+  Search,
+  UploadCloud,
+} from 'lucide-react';
 
 import { Dropzone } from '@/components/Dropzone';
+import { LibraryFileList } from '@/components/library/LibraryFileList';
 import { OnboardingChecklist } from '@/components/OnboardingChecklist';
 import { Button } from '@/components/ui/Button';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from '@/components/ui/Dialog';
 import { SkeletonList } from '@/components/ui/Skeleton';
-import { createFolder, createProject, deleteFile } from '@/lib/api';
-import {
-  useFiles,
-  useFolders,
-  useInvalidateFiles,
-  useOnboarding,
-  useProjects,
-  projectKeys,
-} from '@/lib/queries';
-import type { FileMeta, Folder, Project } from '@/lib/types';
-import { cn } from '@/lib/utils';
+import { createProject } from '@/lib/api';
+import { projectKeys, useFiles, useInvalidateFiles, useOnboarding, useProjects } from '@/lib/queries';
+import type { Project } from '@/lib/types';
 
-function fileSlug(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+const subjectPalette = ['#7a3b2e', '#315f72', '#596b3a', '#6f4d7a', '#8a6536'];
+
+function subjectColor(project: Project, index: number) {
+  return project.color || subjectPalette[index % subjectPalette.length];
+}
+
+function formatUpdated(value: string) {
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(value));
 }
 
 export default function LibraryPage() {
   const { getToken } = useAuth();
   const router = useRouter();
-  const queryClient = useQueryClient();
   const searchParams = useSearchParams();
-  const selectedProjectId = searchParams.get('project');
-  const selectedFolderId = searchParams.get('folder');
-  const fileScope = useMemo(
-    () => ({ projectId: selectedProjectId, folderId: selectedFolderId }),
-    [selectedFolderId, selectedProjectId],
-  );
+  const queryClient = useQueryClient();
   const projectsQuery = useProjects();
-  const foldersQuery = useFolders(selectedProjectId);
-  const filesQuery = useFiles(fileScope);
-  const invalidateFiles = useInvalidateFiles(fileScope);
+  const filesQuery = useFiles();
+  const invalidateFiles = useInvalidateFiles();
   const onboarding = useOnboarding();
   const targetFile = searchParams.get('file_id') ?? searchParams.get('file');
 
-  const files = filesQuery.data ?? [];
-  const listRef = useRef<HTMLUListElement | null>(null);
-  const didScrollRef = useRef<string | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<FileMeta | null>(null);
-  const [deleting, setDeleting] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
-  const [newFolderName, setNewFolderName] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
-  const [creatingFolder, setCreatingFolder] = useState(false);
   const projects = projectsQuery.data ?? [];
-  const folders = foldersQuery.data ?? [];
+  const files = filesQuery.data ?? [];
 
-  const matchId = useMemo(() => {
-    if (!targetFile || !files.length) return null;
-    const byId = files.find((f) => f.id === targetFile);
-    if (byId) return byId.id;
-    const exact = files.find((f) => f.name === targetFile);
-    if (exact) return exact.id;
-    const ci = files.find((f) => f.name.toLowerCase() === targetFile.toLowerCase());
-    return ci?.id ?? null;
-  }, [files, targetFile]);
-
-  useEffect(() => {
-    if (!matchId || didScrollRef.current === matchId) return;
-    didScrollRef.current = matchId;
-    requestAnimationFrame(() => {
-      document
-        .getElementById(`file-${matchId}`)
-        ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    });
-  }, [matchId]);
-
-  const confirmDelete = async () => {
-    if (!pendingDelete) return;
-    setDeleting(true);
-    try {
-      const token = (await getToken()) ?? undefined;
-      await deleteFile(pendingDelete.id, token);
-      await invalidateFiles();
-    } finally {
-      setDeleting(false);
-      setPendingDelete(null);
+  const fileCountsByProject = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const file of files) {
+      if (!file.project_id) continue;
+      counts.set(file.project_id, (counts.get(file.project_id) ?? 0) + 1);
     }
-  };
-
-  const setProject = (projectId: string | null) => {
-    const next = new URLSearchParams(searchParams.toString());
-    if (projectId) next.set('project', projectId);
-    else next.delete('project');
-    next.delete('folder');
-    router.replace(`/library?${next.toString()}`);
-  };
-
-  const setFolder = (folderId: string | null) => {
-    const next = new URLSearchParams(searchParams.toString());
-    if (folderId) next.set('folder', folderId);
-    else next.delete('folder');
-    router.replace(`/library?${next.toString()}`);
-  };
+    return counts;
+  }, [files]);
 
   const addProject = async () => {
     if (!newProjectName.trim()) return;
@@ -121,39 +71,50 @@ export default function LibraryPage() {
         old ? [project, ...old.filter((p) => p.id !== project.id)] : [project],
       );
       setNewProjectName('');
-      setProject(project.id);
+      router.push(`/library/${project.id}` as Route);
     } finally {
       setCreatingProject(false);
     }
   };
 
-  const addFolder = async () => {
-    if (!selectedProjectId || !newFolderName.trim()) return;
-    setCreatingFolder(true);
-    try {
-      const token = (await getToken()) ?? undefined;
-      const folder = await createFolder(selectedProjectId, { name: newFolderName.trim() }, token);
-      queryClient.setQueryData<Folder[]>(projectKeys.folders(selectedProjectId), (old) =>
-        old ? [...old.filter((f) => f.id !== folder.id), folder] : [folder],
-      );
-      setNewFolderName('');
-    } finally {
-      setCreatingFolder(false);
-    }
-  };
-
   return (
-    <div className="mx-auto max-w-4xl px-6 py-8">
+    <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
       <motion.div
-        initial={{ opacity: 0, y: 6 }}
+        initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.2 }}
+        transition={{ duration: 0.22 }}
+        className="flex flex-col gap-5 border-b border-parchment-warm pb-6 lg:flex-row lg:items-end lg:justify-between"
       >
-        <h1 className="font-serif text-2xl text-ink">Library</h1>
-        <p className="mt-1 text-sm text-ink-muted">
-          Drop your readings, lecture slides, and notes. They&apos;ll be chunked,
-          embedded, and made searchable for chat + exam generation.
-        </p>
+        <div>
+          <div className="inline-flex items-center gap-2 rounded-md bg-parchment-warm px-2.5 py-1 text-xs font-medium text-accent">
+            <BookOpen className="h-3.5 w-3.5" />
+            Study library
+          </div>
+          <h1 className="mt-3 font-serif text-3xl text-ink">Library</h1>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-ink-muted">
+            Organise readings by subject, upload once, and start scoped chats with
+            the files that belong to the workspace you are studying.
+          </p>
+        </div>
+
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void addProject();
+          }}
+          className="flex w-full gap-2 rounded-lg border border-parchment-warm bg-parchment p-2 shadow-sm lg:max-w-md"
+        >
+          <input
+            value={newProjectName}
+            onChange={(e) => setNewProjectName(e.target.value)}
+            placeholder="Create a subject"
+            className="min-w-0 flex-1 rounded-md border border-transparent bg-white px-3 py-2 text-sm text-ink placeholder:text-ink-soft focus:border-accent focus:outline-none"
+          />
+          <Button size="sm" disabled={creatingProject || !newProjectName.trim()}>
+            <Plus className="h-3.5 w-3.5" />
+            Add
+          </Button>
+        </form>
       </motion.div>
 
       {!onboarding.isComplete && (
@@ -162,195 +123,132 @@ export default function LibraryPage() {
         </div>
       )}
 
-      <div className="mt-6">
-        <div className="mb-4 grid gap-3 rounded-lg border border-parchment-warm bg-parchment px-4 py-3 md:grid-cols-[1fr_1fr]">
+      <section className="mt-7">
+        <div className="mb-3 flex items-center justify-between gap-3">
           <div>
-            <label className="text-xs font-medium text-ink-muted">Subject</label>
-            <select
-              value={selectedProjectId ?? ''}
-              onChange={(e) => setProject(e.target.value || null)}
-              className="mt-1 w-full rounded border border-parchment-warm bg-white px-2 py-2 text-sm text-ink"
-            >
-              <option value="">All subjects</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-            <div className="mt-2 flex gap-2">
-              <input
-                value={newProjectName}
-                onChange={(e) => setNewProjectName(e.target.value)}
-                placeholder="New subject"
-                className="min-w-0 flex-1 rounded border border-parchment-warm bg-white px-2 py-1.5 text-sm"
-              />
-              <Button size="sm" onClick={addProject} disabled={creatingProject || !newProjectName.trim()}>
-                <Plus className="mr-1 h-3 w-3" />
-                Add
-              </Button>
-            </div>
+            <h2 className="font-serif text-xl text-ink">Subjects</h2>
+            <p className="text-sm text-ink-muted">Click a subject to open its workspace.</p>
           </div>
-          <div>
-            <label className="text-xs font-medium text-ink-muted">Folder</label>
-            <select
-              value={selectedFolderId ?? ''}
-              onChange={(e) => setFolder(e.target.value || null)}
-              disabled={!selectedProjectId}
-              className="mt-1 w-full rounded border border-parchment-warm bg-white px-2 py-2 text-sm text-ink disabled:opacity-60"
-            >
-              <option value="">All folders</option>
-              {folders.map((f) => (
-                <option key={f.id} value={f.id}>
-                  {f.name}
-                </option>
-              ))}
-            </select>
-            <div className="mt-2 flex gap-2">
-              <input
-                value={newFolderName}
-                onChange={(e) => setNewFolderName(e.target.value)}
-                placeholder="New folder"
-                disabled={!selectedProjectId}
-                className="min-w-0 flex-1 rounded border border-parchment-warm bg-white px-2 py-1.5 text-sm disabled:opacity-60"
-              />
-              <Button
-                size="sm"
-                onClick={addFolder}
-                disabled={creatingFolder || !selectedProjectId || !newFolderName.trim()}
-              >
-                <FolderPlus className="mr-1 h-3 w-3" />
-                Add
-              </Button>
-            </div>
-          </div>
+          <Link
+            href="/chat"
+            className="inline-flex items-center gap-2 rounded-md px-2.5 py-2 text-sm text-ink-muted transition hover:bg-parchment-warm hover:text-ink"
+          >
+            <MessageSquare className="h-4 w-4" />
+            New chat
+          </Link>
         </div>
-        <Dropzone
-          projectId={selectedProjectId}
-          folderId={selectedFolderId}
-          onComplete={() => void invalidateFiles()}
-        />
-      </div>
 
-      <h2 className="mt-8 font-serif text-lg text-ink">Your files</h2>
-      {targetFile && !matchId && !filesQuery.isLoading && (
-        <p className="mt-3 text-xs text-ink-soft">
-          Could not find <span className="font-medium text-ink">{targetFile}</span> in your library.
-        </p>
-      )}
-      {filesQuery.isLoading ? (
-        <SkeletonList rows={3} className="mt-3" />
-      ) : files.length === 0 ? (
-        <EmptyFiles />
-      ) : (
-        <ul
-          ref={listRef}
-          className="mt-3 divide-y divide-parchment-warm rounded-lg border border-parchment-warm bg-parchment"
-        >
-          <AnimatePresence initial={false}>
-            {files.map((f) => {
-              const isHit = matchId === f.id;
-              return (
-                <motion.li
-                  key={f.id}
-                  layout
-                  initial={{ opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, x: 12, height: 0, padding: 0 }}
-                  transition={{ duration: 0.2 }}
-                  id={`file-${f.id}`}
-                  data-file-slug={fileSlug(f.name)}
-                  className={cn(
-                    'flex scroll-mt-20 items-center justify-between px-4 py-3',
-                    isHit && 'bg-accent/10 ring-1 ring-accent',
-                  )}
-                >
-                  <div>
-                    <p className="text-ink">{f.name}</p>
-                    <p className="text-xs text-ink-soft">
-                      {f.doc_type}
-                      {f.week ? ` · ${f.week}` : ''}
-                      {' · '}
-                      {f.chunk_count} chunk{f.chunk_count === 1 ? '' : 's'}
-                      {' · '}
-                      <span
-                        className={cn(
-                          f.status === 'ready' && 'text-accent',
-                          f.status === 'failed' && 'text-red-600',
-                        )}
-                      >
-                        {f.status}
-                      </span>
-                    </p>
-                    {f.error && <p className="text-xs text-red-600">{f.error}</p>}
-                  </div>
-                  <button
-                    onClick={() => setPendingDelete(f)}
-                    className="text-ink-muted transition hover:text-red-600"
-                    aria-label={`Delete ${f.name}`}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </motion.li>
-              );
-            })}
-          </AnimatePresence>
-        </ul>
-      )}
-
-      <Dialog
-        open={!!pendingDelete}
-        onOpenChange={(o) => !o && setPendingDelete(null)}
-      >
-        <DialogContent open={!!pendingDelete}>
-          <DialogTitle className="font-serif text-lg text-ink">Delete file?</DialogTitle>
-          <DialogDescription className="mt-2 text-sm text-ink-muted">
-            “{pendingDelete?.name}” and all its chunks will be removed. This can&apos;t be undone.
-          </DialogDescription>
-          <div className="mt-6 flex justify-end gap-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setPendingDelete(null)}
-              disabled={deleting}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={confirmDelete}
-              disabled={deleting}
-            >
-              {deleting ? 'Deleting…' : 'Delete'}
-            </Button>
+        {projectsQuery.isLoading ? (
+          <SkeletonList rows={3} className="mt-3" />
+        ) : projects.length === 0 ? (
+          <EmptySubjects />
+        ) : (
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {projects.map((project, index) => (
+              <SubjectCard
+                key={project.id}
+                project={project}
+                color={subjectColor(project, index)}
+                fileCount={fileCountsByProject.get(project.id) ?? 0}
+              />
+            ))}
           </div>
-        </DialogContent>
-      </Dialog>
+        )}
+      </section>
+
+      <section className="mt-9 grid gap-5 lg:grid-cols-[minmax(0,1fr)_18rem]">
+        <div>
+          <div className="flex items-center gap-2">
+            <FileStack className="h-5 w-5 text-accent" />
+            <h2 className="font-serif text-xl text-ink">All files</h2>
+          </div>
+          <LibraryFileList
+            targetFile={targetFile}
+            emptyDescription="Upload readings here if they do not belong to a subject yet."
+          />
+        </div>
+
+        <div id="upload" className="lg:sticky lg:top-4 lg:self-start">
+          <div className="mb-3 flex items-center gap-2">
+            <UploadCloud className="h-5 w-5 text-accent" />
+            <h2 className="font-serif text-xl text-ink">Upload</h2>
+          </div>
+          <Dropzone onComplete={() => void invalidateFiles()} />
+        </div>
+      </section>
     </div>
   );
 }
 
-function EmptyFiles() {
+function SubjectCard({
+  project,
+  color,
+  fileCount,
+}: {
+  project: Project;
+  color: string;
+  fileCount: number;
+}) {
+  const href = `/library/${project.id}` as Route;
+  const chatHref = `/chat?project=${project.id}` as Route;
+  return (
+    <motion.article
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.2 }}
+      className="group rounded-lg border border-parchment-warm bg-parchment shadow-sm transition hover:-translate-y-0.5 hover:border-accent/30 hover:shadow-md"
+    >
+      <Link href={href} className="block p-4">
+        <div className="flex items-start justify-between gap-3">
+          <span
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md text-white shadow-sm"
+            style={{ backgroundColor: color }}
+          >
+            <BookOpen className="h-5 w-5" />
+          </span>
+          <span className="rounded-md bg-white px-2 py-1 text-xs text-ink-soft ring-1 ring-parchment-warm">
+            {fileCount} file{fileCount === 1 ? '' : 's'}
+          </span>
+        </div>
+        <h3 className="mt-4 truncate font-serif text-lg text-ink">{project.name}</h3>
+        <p className="mt-1 line-clamp-2 min-h-10 text-sm leading-5 text-ink-muted">
+          {project.description || 'A focused workspace for readings, notes, folders, and scoped chat.'}
+        </p>
+        <div className="mt-4 flex items-center justify-between gap-3 text-xs text-ink-soft">
+          <span>Updated {formatUpdated(project.updated_at)}</span>
+          <span className="inline-flex items-center gap-1 text-accent opacity-0 transition group-hover:opacity-100">
+            Open
+            <FolderOpen className="h-3.5 w-3.5" />
+          </span>
+        </div>
+      </Link>
+      <div className="border-t border-parchment-warm px-4 py-2">
+        <Link
+          href={chatHref}
+          className="inline-flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-ink-muted transition hover:bg-parchment-warm hover:text-ink"
+        >
+          <MessageSquare className="h-4 w-4" />
+          Ask in this subject
+        </Link>
+      </div>
+    </motion.article>
+  );
+}
+
+function EmptySubjects() {
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.25 }}
-      className="mt-3 rounded-xl border border-dashed border-parchment-warm bg-parchment px-6 py-10 text-center"
+      transition={{ duration: 0.22 }}
+      className="rounded-lg border border-dashed border-parchment-warm bg-parchment px-6 py-10 text-center"
     >
-      <motion.div
-        animate={{ y: [0, -4, 0] }}
-        transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
-        className="mx-auto inline-flex"
-      >
-        <FileStack className="h-8 w-8 text-accent" />
-      </motion.div>
-      <p className="mt-3 font-serif text-lg text-ink">No files yet</p>
-      <p className="mx-auto mt-1 max-w-sm text-sm text-ink-muted">
-        Drop a PDF, DOCX, image, or markdown file above to get started. Larger
-        readings chunk in the background — you can keep using the rest of the
-        app while they process.
+      <Search className="mx-auto h-8 w-8 text-accent" />
+      <p className="mt-3 font-serif text-lg text-ink">No subjects yet</p>
+      <p className="mx-auto mt-1 max-w-md text-sm text-ink-muted">
+        Create a subject for each course or assignment, then upload readings into
+        that workspace so chat retrieval stays focused.
       </p>
     </motion.div>
   );
