@@ -48,10 +48,52 @@ export class ApiError extends Error {
   }
 }
 
+/** Thrown by ``withAuth`` when Clerk's session token never resolves within the
+ *  configured timeout. Callers should surface this as a "reconnecting" UI
+ *  state and let TanStack retry, rather than rendering a generic error. */
+export class AuthNotReadyError extends Error {
+  constructor() {
+    super('Auth not ready — Clerk session token unavailable');
+    this.name = 'AuthNotReadyError';
+  }
+}
+
+/** Hook-set callback used by ``request()`` to refresh a token on 401.
+ *  Wired by ``Providers.tsx`` so the API layer can replay a single
+ *  request with a fresh JWT without dragging Clerk's React hooks into
+ *  every queryFn. */
+type TokenProvider = (opts?: { skipCache?: boolean }) => Promise<string | null>;
+let _tokenProvider: TokenProvider | null = null;
+export function setTokenProvider(provider: TokenProvider | null): void {
+  _tokenProvider = provider;
+}
+
+const TOKEN_TIMEOUT_MS = 5_000;
+const REQUEST_TIMEOUT_MS = 15_000;
+
+/** Await the registered token provider with a hard timeout.
+ *
+ *  After a fresh sign-in Clerk's in-memory token can be briefly null while
+ *  the SDK hydrates; resolving with a timeout here lets callers surface a
+ *  "reconnecting" state instead of hanging the request indefinitely.
+ */
+export async function withAuth<T>(
+  getToken: TokenProvider,
+  fn: (token: string) => Promise<T>,
+): Promise<T> {
+  const token = await Promise.race([
+    getToken(),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), TOKEN_TIMEOUT_MS)),
+  ]);
+  if (!token) throw new AuthNotReadyError();
+  return fn(token);
+}
+
 async function request<T>(
   path: string,
   init: RequestInit = {},
   token?: string,
+  attempt: number = 0,
 ): Promise<T> {
   const headers = new Headers(init.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
@@ -61,7 +103,34 @@ async function request<T>(
     headers.set('Content-Type', headers.get('Content-Type') ?? 'application/json');
   }
 
-  const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
+  // Apply a request timeout unless the caller already supplied a signal
+  // (chat streaming wires its own AbortSignal).
+  const controller = init.signal ? null : new AbortController();
+  const timer = controller
+    ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+    : null;
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      headers,
+      signal: init.signal ?? controller?.signal,
+    });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+
+  // One-shot replay on 401: most often a fresh sign-in race where the token
+  // wasn't yet in memory. Refresh via the registered provider (skipCache)
+  // and retry exactly once.
+  if (res.status === 401 && attempt === 0 && _tokenProvider) {
+    const fresh = await _tokenProvider({ skipCache: true }).catch(() => null);
+    if (fresh && fresh !== token) {
+      return request<T>(path, init, fresh, attempt + 1);
+    }
+  }
+
   if (!res.ok) {
     throw new ApiError(res.status, await res.text().catch(() => ''));
   }
@@ -171,3 +240,19 @@ export const submitExam = (
     { method: 'POST', body: JSON.stringify({ answers }) },
     token,
   );
+
+// Users -----------------------------------------------------------------------
+
+export interface UserMe {
+  id: string;
+  clerk_id: string;
+  email: string | null;
+  onboarded_at: string | null;
+  created_at: string;
+}
+
+export const getMe = (token?: string) =>
+  request<UserMe>('/users/me', { method: 'GET' }, token);
+
+export const markOnboarded = (token?: string) =>
+  request<UserMe>('/users/me/onboarded', { method: 'POST' }, token);
