@@ -23,7 +23,7 @@ Project was forked from a Streamlit prototype called ashGPT and productized into
 | Edge proxy | Cloudflare Worker (`lawgpt-edge`) — auth check, R2 presign, BACKEND_ORIGIN proxy | `infra/worker/` |
 | Backend | FastAPI + SQLAlchemy async + LangGraph agent | `backend/` |
 | Hosting (BE) | GCP Cloud Run (per org policy — production / healthcare-adjacent prod traffic) | configured outside repo |
-| Auth | Clerk (currently `pk_test_…` dev instance) | env vars in Pages + worker |
+| Auth | Clerk **production** instance on `clerk.ashgpt.xyz` (`pk_live_…`) | env vars in Pages + worker |
 | Vector store | pgvector on managed Postgres | `backend/src/storage/vector_store.py` |
 | Blob store | Cloudflare R2 | `backend/src/storage/blob.py` |
 | LLM | Anthropic Claude (synthesis + verification + IRAC) — accuracy over cost | `backend/src/llm.py` |
@@ -156,7 +156,7 @@ When the user opens an old chat, `frontend/src/app/(app)/chat/[sessionId]/page.t
 cd frontend
 npm ci
 NEXT_PUBLIC_API_BASE=https://api.ashgpt.xyz \
-NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_… \
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_live_Y2xlcmsuYXNoZ3B0Lnh5eiQ \
 npx @cloudflare/next-on-pages@1
 npx wrangler pages deploy .vercel/output/static --project-name=ashgpt --branch=main
 ```
@@ -168,16 +168,18 @@ npx wrangler pages deploy .vercel/output/static --project-name=ashgpt --branch=m
 ## Environment variables
 
 ### Frontend (Pages project env)
-- `NEXT_PUBLIC_API_BASE` → `https://api.ashgpt.xyz`
-- `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` → `pk_test_…`
-- `CLERK_PUBLISHABLE_KEY` → same as above (server-side helper)
-- `CLERK_SECRET_KEY` → **secret** `sk_test_…`
-- `NODE_VERSION` → `20`
 
-### Worker (`lawgpt-edge`)
-- `BACKEND_ORIGIN` → Cloud Run URL of FastAPI service
-- `CLERK_JWKS_URL`
-- `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`
+Public-build vars (`NEXT_PUBLIC_*`) live in `frontend/wrangler.toml`'s `[vars]` block and are inlined into client JS by Next at build time. The Pages dashboard now defers to wrangler.toml for these — the dashboard fields are read-only when a `[vars]` block exists.
+
+- `NEXT_PUBLIC_API_BASE` → `https://api.ashgpt.xyz` (wrangler.toml)
+- `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` → `pk_live_Y2xlcmsuYXNoZ3B0Lnh5eiQ` (wrangler.toml)
+- `CLERK_SECRET_KEY` → **secret** `sk_live_…` (Pages dashboard → encrypted env vars, **not** in wrangler.toml)
+- `NODE_VERSION` → `20` (dashboard)
+
+### Worker (`lawgpt-edge`, `infra/wrangler.toml`)
+
+- `[vars]` (public): `CLERK_ISSUER = "https://clerk.ashgpt.xyz"`, `CORS_ORIGINS`, `R2_BUCKET`, `R2_ACCOUNT_ID`. JWKS URL is derived as `<CLERK_ISSUER>/.well-known/jwks.json`.
+- Secrets (set via `wrangler secret put`, never committed): `BACKEND_ORIGIN`, `CLERK_SECRET_KEY` (`sk_live_…`), `DATABASE_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `ANTHROPIC_API_KEY`, `COHERE_API_KEY`.
 
 ### Backend (Cloud Run env)
 - `CORS_ORIGINS=https://ashgpt.xyz,https://www.ashgpt.xyz,https://ashgpt.pages.dev`

@@ -39,7 +39,7 @@ Cloudflare Container (LawgptBackend DO)
 | Vector store | Neon Postgres + pgvector | n/a — managed | n/a |
 | Relational | Cloudflare D1 (`lawgpt-prod`, id `02f7936a-d1f7-44bc-8b2e-0488dcdc1ecb`) | `backend/src/storage/db.py` | `wrangler d1 migrations` (manual on schema change) |
 | Blob | Cloudflare R2 (`lawgpt-uploads`) | `backend/src/storage/blob.py` | bound in `infra/wrangler.toml` |
-| Auth | Clerk (test instance `solid-fly-14`) | Worker + FastAPI dep | dashboard-managed |
+| Auth | Clerk **production** on `clerk.ashgpt.xyz` (`pk_live_…`) | Worker + FastAPI dep | wrangler.toml + dashboard secrets |
 
 ## Request flow — chat (`POST /chat`)
 
