@@ -22,7 +22,7 @@ Project was forked from a Streamlit prototype called ashGPT and productized into
 | Hosting (FE) | Cloudflare Pages (project slug: `ashgpt`) via `@cloudflare/next-on-pages` | dashboard + `frontend/wrangler.toml` |
 | Edge proxy | Cloudflare Worker (`lawgpt-edge`) — auth check, R2 presign, BACKEND_ORIGIN proxy | `infra/worker/` |
 | Backend | FastAPI + SQLAlchemy async + LangGraph agent | `backend/` |
-| Hosting (BE) | GCP Cloud Run | configured outside repo |
+| Hosting (BE) | Cloudflare Containers (`LawgptBackend` Durable Object, bound from the edge worker — see `[[containers]]` in `infra/wrangler.toml`) | `infra/wrangler.toml` |
 | Auth | Clerk **production** instance on `clerk.ashgpt.xyz` (`pk_live_…`) | env vars in Pages + worker |
 | Vector store | pgvector on managed Postgres | `backend/src/storage/vector_store.py` |
 | Blob store | Cloudflare R2 | `backend/src/storage/blob.py` |
@@ -156,7 +156,7 @@ npx @cloudflare/next-on-pages@1
 npx wrangler pages deploy .vercel/output/static --project-name=ashgpt --branch=main
 ```
 
-**Backend deploy** — out of repo, runs on GCP Cloud Run. Push to GitHub and trigger the Cloud Run deploy manually.
+**Backend deploy** — backend runs as a Cloudflare Container bound to the `lawgpt-edge` worker via Durable Object. `cd infra && wrangler deploy` ships both the worker and rebuilds the container from `backend/Containerfile`. Env vars + secrets are managed through `infra/wrangler.toml` `[vars]` and `wrangler secret put`.
 
 ---
 
@@ -176,12 +176,12 @@ Public-build vars (`NEXT_PUBLIC_*`) live in `frontend/wrangler.toml`'s `[vars]` 
 - `[vars]` (public): `CLERK_ISSUER = "https://clerk.ashgpt.xyz"`, `CORS_ORIGINS`, `R2_BUCKET`, `R2_ACCOUNT_ID`. JWKS URL is derived as `<CLERK_ISSUER>/.well-known/jwks.json`.
 - Secrets (set via `wrangler secret put`, never committed): `BACKEND_ORIGIN`, `CLERK_SECRET_KEY` (`sk_live_…`), `DATABASE_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `ANTHROPIC_API_KEY`, `COHERE_API_KEY`.
 
-### Backend (Cloud Run env)
-- `CORS_ORIGINS=https://ashgpt.xyz,https://www.ashgpt.xyz,https://ashgpt.pages.dev`
-- `DATABASE_URL` (Postgres + pgvector)
-- `ANTHROPIC_API_KEY`, `COHERE_API_KEY`
-- `CLERK_JWKS_URL`, `CLERK_SECRET_KEY`
-- `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`
+### Backend (Cloudflare Container env)
+
+Backend container picks up the same `[vars]` block as the worker (single `infra/wrangler.toml`), so `CLERK_ISSUER` / `CORS_ORIGINS` / `R2_*` are set once. Backend-specific env reads:
+
+- `CLERK_ISSUER` (used to derive JWKS URL — no separate `CLERK_JWKS_URL` needed).
+- Secrets (via `wrangler secret put`): `DATABASE_URL` (Postgres + pgvector), `ANTHROPIC_API_KEY`, `COHERE_API_KEY`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`.
 
 ---
 
