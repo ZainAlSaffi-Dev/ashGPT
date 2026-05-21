@@ -208,6 +208,7 @@ Backend container picks up the same `[vars]` block as the worker (single `infra/
 7. **Chat auth is streaming, not `request()`** — JSON API calls use `withAuth` + one-shot 401 token replay. Keep `/chat` streaming on the same token-wait/retry behavior; grabbing `getToken()` once can race right after sign-in/sign-up and produce edge 401s.
 8. **Chat streams can outlive route state** — always pass an `AbortSignal` into `/chat` streaming and abort on unmount/session switch. A first-message stream that completes after the user leaves `/chat` can otherwise `router.replace` them back to `/chat/<id>`.
 9. **No `keepPreviousData` for per-session messages** — it can briefly render chat A's turns under chat B's URL during rapid session switching. Seed/cache only the exact `['messages', sessionId]` key.
+10. **Protected-route sign-in redirects must stay same-origin** — unauthenticated document navigations to `/chat` routes should redirect to `/?redirect_url=...`, not Clerk's account portal host. The landing page sanitizes that value before handing it to Clerk modal buttons.
 
 ## Backend gotchas
 
@@ -250,6 +251,7 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - Auth production fix: Clerk Frontend API is proxied through `https://ashgpt.xyz/__clerk`, sign-in/sign-up redirect to `/chat`, Worker JWKS discovery uses the proxy path, and chat streaming now waits for a Clerk token plus retries once after a 401.
 - Production auth verification: `https://ashgpt.xyz` now boots Clerk cleanly, sign-in modal opens on the production domain, and phone chat requests passed Worker auth; avoid testing Clerk on `*.ashgpt.pages.dev` previews unless that origin is explicitly added/configured in Clerk.
 - Performance/stability pass: chat streams now abort on unmount/session switch, first-session completion seeds exact message/session caches before URL promotion, per-session message queries no longer reuse previous-session data, cold history rehydrates when messages arrive, and the first-run tour lazy-loads after the app shell paints.
+- Protected-route redirect fix: unauthenticated browser visits to signed-in pages now redirect to the same-origin landing page with a sanitized `redirect_url`, avoiding the broken `accounts.ashgpt.xyz` account-portal hop while preserving deep-link intent after modal sign-in.
 
 ---
 

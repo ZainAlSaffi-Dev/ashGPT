@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { SignInButton, SignUpButton, useAuth } from '@clerk/nextjs';
@@ -26,10 +26,23 @@ import { Button } from '@/components/ui/Button';
 export default function LandingPage() {
   const router = useRouter();
   const { isLoaded, isSignedIn } = useAuth();
+  const [authRedirectUrl, setAuthRedirectUrl] = useState('/chat');
 
   useEffect(() => {
     if (isLoaded && isSignedIn) router.replace('/chat');
   }, [isLoaded, isSignedIn, router]);
+
+  useEffect(() => {
+    const raw = new URLSearchParams(window.location.search).get('redirect_url');
+    if (!raw) return;
+    try {
+      const parsed = new URL(raw, window.location.origin);
+      if (parsed.origin !== window.location.origin) return;
+      setAuthRedirectUrl(`${parsed.pathname}${parsed.search}${parsed.hash}` || '/chat');
+    } catch {
+      // Ignore malformed redirect targets; the default /chat remains safe.
+    }
+  }, []);
 
   return (
     <main className="grid min-h-screen place-items-center bg-parchment px-6 py-16">
@@ -55,10 +68,18 @@ export default function LandingPage() {
         <div className="mt-8 flex items-center justify-center gap-3">
           {isLoaded && !isSignedIn && (
             <>
-              <SignUpButton mode="modal" forceRedirectUrl="/chat" fallbackRedirectUrl="/chat">
+              <SignUpButton
+                mode="modal"
+                forceRedirectUrl={authRedirectUrl}
+                fallbackRedirectUrl={authRedirectUrl}
+              >
                 <Button size="lg">Create account</Button>
               </SignUpButton>
-              <SignInButton mode="modal" forceRedirectUrl="/chat" fallbackRedirectUrl="/chat">
+              <SignInButton
+                mode="modal"
+                forceRedirectUrl={authRedirectUrl}
+                fallbackRedirectUrl={authRedirectUrl}
+              >
                 <Button size="lg" variant="secondary">
                   Sign in
                 </Button>
