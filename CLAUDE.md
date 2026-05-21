@@ -22,18 +22,13 @@ Project was forked from a Streamlit prototype called ashGPT and productized into
 | Hosting (FE) | Cloudflare Pages (project slug: `ashgpt`) via `@cloudflare/next-on-pages` | dashboard + `frontend/wrangler.toml` |
 | Edge proxy | Cloudflare Worker (`lawgpt-edge`) — auth check, R2 presign, BACKEND_ORIGIN proxy | `infra/worker/` |
 | Backend | FastAPI + SQLAlchemy async + LangGraph agent | `backend/` |
-| Hosting (BE) | GCP Cloud Run (per org policy — production / healthcare-adjacent prod traffic) | configured outside repo |
+| Hosting (BE) | GCP Cloud Run | configured outside repo |
 | Auth | Clerk **production** instance on `clerk.ashgpt.xyz` (`pk_live_…`) | env vars in Pages + worker |
 | Vector store | pgvector on managed Postgres | `backend/src/storage/vector_store.py` |
 | Blob store | Cloudflare R2 | `backend/src/storage/blob.py` |
 | LLM | Anthropic Claude (synthesis + verification + IRAC) — accuracy over cost | `backend/src/llm.py` |
 | Embeddings + rerank | Cohere | `backend/src/embeddings.py`, `backend/src/agent/reranker.py` |
 | Parsing | unstructured, pypdf, python-docx, pillow OCR | `backend/src/ingestion/` |
-
-**Approved infra (org policy):**
-- Hosting: GCP (prod) + Cloudflare Pages/Workers (prototypes/internal). Never Vercel/Netlify/Fly/Render/Heroku.
-- Automation/integrations: Zapier (preferred) or n8n.
-- Google Workspace integrations: must go through Zapier.
 
 ---
 
@@ -161,7 +156,7 @@ npx @cloudflare/next-on-pages@1
 npx wrangler pages deploy .vercel/output/static --project-name=ashgpt --branch=main
 ```
 
-**Backend deploy** — out of repo, runs on GCP Cloud Run. If a deploy is needed, the org policy is: push to GitHub then ping Freddy in Slack to run the deploy.
+**Backend deploy** — out of repo, runs on GCP Cloud Run. Push to GitHub and trigger the Cloud Run deploy manually.
 
 ---
 
@@ -213,8 +208,7 @@ Public-build vars (`NEXT_PUBLIC_*`) live in `frontend/wrangler.toml`'s `[vars]` 
 ## Backend gotchas
 
 1. **No proper Alembic yet.** `init_db` runs `create_all` then idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for post-v1 columns on Postgres. SQLite (tests) skips the ALTERs because `create_all` already produces the right schema on a fresh DB. When you add new columns, append to `_apply_inline_migrations` in `backend/src/storage/db.py`.
-2. **Org rule:** patient / PHI / clinical / consultation data must **never** be entered into Claude Code (this CLI). Allowed in Claude Chat. ashGPT is a study tool for legal materials — it stays well clear of this, but be careful if pasting test fixtures.
-3. **Secrets** never go into Claude Code at all. No API keys, tokens, passwords, connection strings in chat or in code committed to the repo.
+2. **Secrets** never go into Claude Code at all. No API keys, tokens, passwords, connection strings in chat or in code committed to the repo.
 
 ---
 
