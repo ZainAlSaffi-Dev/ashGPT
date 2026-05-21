@@ -246,6 +246,28 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - Branding: LawGPT → ashGPT in user-visible strings; `wrangler.toml` project slug `lawgpt` → `ashgpt`; `NEXT_PUBLIC_API_BASE` → `https://api.ashgpt.xyz`. CI updated.
 - Bug fix: `import type { Plugin } from 'unified'` in rehype-citations.ts broke the CF Pages typecheck (transitive dep, not in package.json). Replaced with a plain transformer type.
 - Auth production fix: Clerk Frontend API is proxied through `https://ashgpt.xyz/__clerk`, sign-in/sign-up redirect to `/chat`, Worker JWKS discovery uses the proxy path, and chat streaming now waits for a Clerk token plus retries once after a 401.
+- Production auth verification: `https://ashgpt.xyz` now boots Clerk cleanly, sign-in modal opens on the production domain, and phone chat requests passed Worker auth; avoid testing Clerk on `*.ashgpt.pages.dev` previews unless that origin is explicitly added/configured in Clerk.
+
+---
+
+## Optimization handoff (next session)
+
+The next workstream should focus on speed, stability, and deterministic navigation after auth. Use `docs/optimization_handoff.md` as the starting prompt.
+
+Current state:
+
+- Production auth is no longer the main blocker. The landing page leaves `Loading...`, Clerk proxy calls to `https://ashgpt.xyz/__clerk` return OK, and `/chat` requests from a signed-in phone reached the Worker as authenticated.
+- A visible chat "401" after this point is more likely to be an upstream provider error emitted inside the SSE stream than a browser/Clerk auth failure. Check backend stream logs before changing auth again.
+- The preview URL `898be570.ashgpt.pages.dev` showed Clerk 400s because Clerk could not attribute that origin to the production instance. Test user flows on `https://ashgpt.xyz` unless preview auth is intentionally configured.
+- Cache/history behavior today: valid authenticated requests can populate TanStack Query and persisted chat history; failed chat streams may appear temporarily in UI but are not reliable durable history.
+
+Optimization targets:
+
+- Eliminate random refreshes, wrong-page redirects, and accidental route changes while sending chat or immediately after sign-in/sign-up.
+- Make guided tour/onboarding feel instant; lazy-load heavy tutorial code only after the main chat shell is interactive.
+- Make chat history loading fast and predictable. Audit `useSessions`, `useMessages`, local optimistic state, invalidations, stale times, and focus/refetch behavior.
+- Stress test core flows with browser automation: fresh visit, sign-in, sign-up redirect, send chat, stream interruption, reload during stream, back/forward navigation, session switch, history reload, and mobile viewport.
+- Do not add Redis by default. First measure client/server bottlenecks and Cloudflare/container constraints; add new infrastructure only if the profile proves in-process/browser/query caching is insufficient.
 
 ---
 
