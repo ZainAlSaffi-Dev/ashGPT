@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { Root, Element } from 'hast';
 
-import { rehypeCitations } from './rehype-citations';
+import {
+  rehypeCitations,
+  type HastElement as Element,
+  type HastRoot as Root,
+} from './rehype-citations';
 
 /** Build a minimal hast tree wrapping a single text node and run the plugin
  *  against it. Returns the transformed root for assertions. */

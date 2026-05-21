@@ -14,7 +14,33 @@
  */
 
 import { visit } from 'unist-util-visit';
-import type { Root, Text, Element } from 'hast';
+
+// Minimal local hast types. ``@types/hast`` is a transitive dependency
+// (pulled in by react-markdown / rehype-*) rather than a direct one, so
+// CF Pages's stricter pnpm install fails to resolve the module during
+// typecheck. Same gotcha as the earlier ``unified`` removal — keep these
+// shapes inline. Exported so the unit test can reuse them without
+// reaching into the transitive type package.
+export interface HastText {
+  type: 'text';
+  value: string;
+}
+
+export interface HastElement {
+  type: 'element';
+  tagName: string;
+  properties?: Record<string, unknown>;
+  children: (HastText | HastElement)[];
+}
+
+export interface HastRoot {
+  type: 'root';
+  children: (HastText | HastElement)[];
+}
+
+type Text = HastText;
+type Element = HastElement;
+type Root = HastRoot;
 
 const CITE_RE = /\[S(\d+)\]/g;
 const EXTERNAL_RE = /\[external\]/gi;
