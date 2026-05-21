@@ -3,7 +3,7 @@
  *
  * Responsibilities (kept thin):
  *   1. Verify the Clerk JWT on every authenticated request.
- *   2. Issue R2 presigned PUT URLs for direct browser → R2 uploads.
+ *   2. Receive authenticated browser uploads and stream them into R2.
  *   3. Proxy everything else to the FastAPI container.
  *
  * The container holds the LangGraph pipeline and DB writes. Keeping the
@@ -11,7 +11,6 @@
  * runs when needed.
  */
 
-import { AwsClient } from 'aws4fetch';
 import { Container } from '@cloudflare/containers';
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 
@@ -33,7 +32,7 @@ export interface Env {
   GOOGLE_API_KEY?: string;
   ZEMBED_API_KEY?: string;
   COHERE_API_KEY?: string;
-  // R2 S3-API credentials for presigning (set via wrangler secret put):
+  // R2 S3-API credentials forwarded to the backend container for HEAD/read.
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
   R2_ACCOUNT_ID?: string;
@@ -41,6 +40,7 @@ export interface Env {
 }
 
 const CLERK_PROXY_PATH = '/__clerk';
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 function matchesClerkProxyPath(pathname: string): boolean {
   return pathname === CLERK_PROXY_PATH || pathname.startsWith(`${CLERK_PROXY_PATH}/`);
 }
@@ -114,25 +114,43 @@ async function verifyClerk(req: Request, env: Env): Promise<JWTPayload | null> {
   }
 }
 
-async function r2PresignPut(env: Env, body: { name: string; mime: string; user_id: string }) {
-  if (!env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY || !env.R2_ACCOUNT_ID) {
-    throw new Error('R2 presign requires R2_* secrets');
+function safeUploadName(name: string): string {
+  return name.replace(/[^\w.\-()]/g, '_') || 'upload';
+}
+
+function r2ObjectKey(userId: string, name: string): string {
+  return `${userId}/${crypto.randomUUID()}/${safeUploadName(name)}`;
+}
+
+function workerUploadUrl(origin: string, key: string): string {
+  const uploadUrl = new URL('/uploads/blob', origin);
+  uploadUrl.searchParams.set('key', key);
+  return uploadUrl.toString();
+}
+
+async function receiveUpload(req: Request, env: Env, userId: string, url: URL): Promise<Response> {
+  const key = url.searchParams.get('key') ?? '';
+  if (!key) return new Response('missing upload key', { status: 400 });
+  if (!key.startsWith(`${userId}/`)) return new Response('key does not belong to user', { status: 403 });
+  if (key.includes('..')) return new Response('invalid upload key', { status: 400 });
+
+  const contentLength = req.headers.get('content-length');
+  if (contentLength && Number(contentLength) > MAX_UPLOAD_BYTES) {
+    return new Response('file too large', { status: 413 });
   }
-  const aws = new AwsClient({
-    accessKeyId: env.R2_ACCESS_KEY_ID,
-    secretAccessKey: env.R2_SECRET_ACCESS_KEY,
-    region: 'auto',
-    service: 's3',
-  });
-  const bucket = env.R2_BUCKET ?? 'lawgpt-uploads';
-  const key = `${body.user_id}/${crypto.randomUUID()}/${body.name.replace(/[^\w.\-()]/g, '_')}`;
-  // 15-minute expiry encoded as a query param so it is included in the
-  // signature; aws4fetch has no `expiresIn` option.
-  const endpoint = `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${bucket}/${key}?X-Amz-Expires=900`;
-  const signed = await aws.sign(new Request(endpoint, { method: 'PUT', headers: { 'content-type': body.mime } }), {
-    aws: { signQuery: true },
-  });
-  return { upload_url: signed.url, blob_key: key };
+  if (!req.body) return new Response('missing upload body', { status: 400 });
+
+  try {
+    await env.UPLOADS.put(key, req.body, {
+      httpMetadata: {
+        contentType: req.headers.get('content-type') ?? 'application/octet-stream',
+      },
+    });
+  } catch (e) {
+    console.error(`R2 upload failed key=${key}: ${(e as Error).message}`);
+    return new Response('upload storage failed', { status: 502 });
+  }
+  return new Response(null, { status: 204 });
 }
 
 export default {
@@ -165,7 +183,14 @@ export default {
     }
     const userId = String(claims.sub);
 
-    // Edge-only fast path: presigned PUT URL for direct R2 upload.
+    // Edge-only fast path: authenticated same-origin upload into R2. This
+    // deliberately avoids browser → R2 direct PUTs so production uploads do
+    // not depend on bucket CORS or S3 presign header matching.
+    if (url.pathname === '/uploads/blob' && req.method === 'PUT') {
+      return withCors(await receiveUpload(req, env, userId, url), env, origin);
+    }
+
+    // Edge-only fast path: register a file row and return a Worker upload URL.
     if (url.pathname === '/uploads/presign' && req.method === 'POST') {
       // Clone before .json() — the original ``req`` is forwarded to the
       // container further down and the underlying body stream can only be
@@ -173,14 +198,21 @@ export default {
       // body").
       const body = await req.clone().json<{ name: string; mime: string; doc_type?: string; week?: string | null }>();
       try {
-        const { upload_url, blob_key } = await r2PresignPut(env, {
-          name: body.name,
-          mime: body.mime,
-          user_id: userId,
-        });
-        // Forward to the container so it records the File row in D1; container
-        // returns the file_id we then echo with the presigned URL.
+        const blob_key = r2ObjectKey(userId, body.name);
+        const upload_url = workerUploadUrl(url.origin, blob_key);
+        // Forward to the container so it records the File row in Postgres;
+        // container returns the file_id we then echo with the Worker upload URL.
         const containerResp = await proxyToBackend(env, req, userId, { presigned: { upload_url, blob_key } });
+        if (!containerResp.ok) {
+          return withCors(
+            new Response(await containerResp.text().catch(() => ''), {
+              status: containerResp.status,
+              statusText: containerResp.statusText,
+            }),
+            env,
+            origin,
+          );
+        }
         const containerBody = await containerResp.json<{ file_id: string }>();
         return withCors(Response.json({
           file_id: containerBody.file_id,

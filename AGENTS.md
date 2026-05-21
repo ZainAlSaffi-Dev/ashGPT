@@ -212,6 +212,7 @@ Backend container picks up the same `[vars]` block as the worker (single `infra/
 10. **Protected-route sign-in redirects must stay same-origin** — unauthenticated document navigations to `/chat` routes should redirect to `/?redirect_url=...`, not Clerk's account portal host. The landing page sanitizes that value before handing it to Clerk modal buttons.
 11. **Landing redirect must not wait on `getToken()`** — after modal sign-in, navigate as soon as Clerk reports `isSignedIn`; token readiness is handled by authed query gates. Waiting for a token on `/` can leave the user on the spinner until manual refresh.
 12. **Route transitions inside the app shell must be enter-only** — `AppShell` scrolls inside a custom `<main>`, so an exiting `AnimatePresence` route left in normal flow stacks the old page above the new one and makes workspace pages look blank until you scroll.
+13. **Uploads should stay on the API origin** — browser → R2 direct PUTs are fragile because bucket CORS and signed `Content-Type` must match exactly. Production uploads now use an authenticated Worker `/uploads/blob` URL; keep Dropzone on `withAuth`, clean up the placeholder file row when blob upload fails, and disable subject uploads until a `?folder=` param is validated.
 
 ## Backend gotchas
 
@@ -220,6 +221,7 @@ Backend container picks up the same `[vars]` block as the worker (single `infra/
 3. **Conversation memory is not source evidence.** `conversation_memory` is rebuilt per session from older persisted turns and may resolve shorthand, jurisdiction, goals, corrections, and authorities already discussed, but answer facts still need retrieved `[S#]` citations or `[external]`.
 4. **Scoped retrieval is two-legged.** Project/folder/file scope must be applied to both pgvector metadata filters and BM25 cache/search. BM25 cache keys are now `user_id:scope_hash`; invalidating a user must clear all keys with that prefix.
 5. **Worker routes are dashboard-managed.** `infra/wrangler.toml` intentionally does not declare `ashgpt.xyz/__clerk` routes; otherwise GitHub Actions needs zone-level `Workers Routes: Edit/Write` for `ashgpt.xyz` plus `Zone: Read` and fails with Cloudflare code 10000 when the token is account-only.
+6. **Upload rows are created before bytes land.** `/uploads/presign` registers the file, then the browser/Worker writes the blob, then `/process` indexes it. A missing blob must remain retryable, a failed blob transfer should delete the placeholder row, and zero extracted chunks should surface as a clear failed upload rather than a ready-but-useless file.
 
 ---
 
@@ -266,6 +268,7 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - Project workspace revamp: `/library` is now a subject overview, subjects open `/library/[projectId]` workspaces with folder-scoped files/uploads/chat links, and the sidebar shows nested subject links.
 - Workspace navigation polish: route transitions are enter-only and the app shell resets its internal scroll container on pathname changes so subject workspace pages open at the top instead of stacking below the previous page.
 - Project workspace sessions: subject pages now show a scoped recent-chats panel with resume links and a new subject-chat action backed by `useSessions({ projectId })`.
+- Upload hardening: production uploads now stream through authenticated Worker `/uploads/blob` into R2 instead of direct browser → R2 CORS PUTs; Dropzone waits for Clerk tokens, validates/rejects unsupported files visibly, cleans up failed placeholder rows, blocks invalid folder scopes, and backend tests cover scoped upload/process retry.
 
 ---
 

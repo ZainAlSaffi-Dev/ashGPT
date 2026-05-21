@@ -74,6 +74,7 @@ export function setTokenProvider(provider: TokenProvider | null): void {
 
 const TOKEN_TIMEOUT_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 15_000;
+type ApiRequestInit = RequestInit & { timeoutMs?: number };
 
 /** Await the registered token provider with a hard timeout.
  *
@@ -95,10 +96,11 @@ export async function withAuth<T>(
 
 async function request<T>(
   path: string,
-  init: RequestInit = {},
+  init: ApiRequestInit = {},
   token?: string,
   attempt: number = 0,
 ): Promise<T> {
+  const { timeoutMs = REQUEST_TIMEOUT_MS, ...fetchInit } = init;
   const headers = new Headers(init.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   const devUser = process.env.NEXT_PUBLIC_DEV_USER;
@@ -109,15 +111,15 @@ async function request<T>(
 
   // Apply a request timeout unless the caller already supplied a signal
   // (chat streaming wires its own AbortSignal).
-  const controller = init.signal ? null : new AbortController();
+  const controller = init.signal || timeoutMs <= 0 ? null : new AbortController();
   const timer = controller
-    ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+    ? setTimeout(() => controller.abort(), timeoutMs)
     : null;
 
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, {
-      ...init,
+      ...fetchInit,
       headers,
       signal: init.signal ?? controller?.signal,
     });
@@ -255,18 +257,22 @@ export async function uploadBlob(
   upload: PresignResponse,
   data: Blob,
   token?: string,
+  contentType: string = data.type || 'application/octet-stream',
 ): Promise<void> {
-  // Local-dev path goes through the FastAPI backend (POST), which means we
-  // need to include auth headers; R2 path is a presigned PUT direct to R2.
-  const isLocal = upload.upload_url.startsWith('/uploads/local/');
-  if (isLocal) {
+  const isApiUpload =
+    upload.upload_url.startsWith('/uploads/') ||
+    upload.upload_url.startsWith(`${API_BASE}/uploads/`);
+  if (isApiUpload) {
+    const url = upload.upload_url.startsWith('/uploads/')
+      ? `${API_BASE}${upload.upload_url}`
+      : upload.upload_url;
     const headers = new Headers();
     if (token) headers.set('Authorization', `Bearer ${token}`);
     const devUser = process.env.NEXT_PUBLIC_DEV_USER;
     if (devUser && !token) headers.set('X-Dev-User', devUser);
-    headers.set('Content-Type', data.type || 'application/octet-stream');
-    const res = await fetch(`${API_BASE}${upload.upload_url}`, {
-      method: 'POST',
+    headers.set('Content-Type', contentType);
+    const res = await fetch(url, {
+      method: upload.method,
       body: data,
       headers,
     });
@@ -276,7 +282,7 @@ export async function uploadBlob(
   const res = await fetch(upload.upload_url, {
     method: upload.method,
     body: data,
-    headers: { 'Content-Type': data.type || 'application/octet-stream' },
+    headers: { 'Content-Type': contentType },
   });
   if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => ''));
 }
@@ -284,7 +290,7 @@ export async function uploadBlob(
 export const processUpload = (fileId: string, token?: string) =>
   request<{ file_id: string; status: string; chunk_count: number; job_id?: string | null }>(
     `/uploads/${fileId}/process`,
-    { method: 'POST' },
+    { method: 'POST', timeoutMs: 120_000 },
     token,
   );
 

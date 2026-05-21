@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
@@ -52,8 +52,13 @@ export default function ProjectWorkspacePage() {
   const foldersQuery = useFolders(projectId);
   const project = projectsQuery.data?.find((item) => item.id === projectId);
   const folders = foldersQuery.data ?? [];
+  const rawFolderBelongsToProject = rawFolderId
+    ? folders.some((folder) => folder.id === rawFolderId)
+    : true;
+  const folderSelectionPending = !!rawFolderId && foldersQuery.isLoading;
+  const folderSelectionInvalid = !!rawFolderId && !foldersQuery.isLoading && !rawFolderBelongsToProject;
   const selectedFolderId =
-    rawFolderId && (foldersQuery.isLoading || folders.some((folder) => folder.id === rawFolderId))
+    rawFolderId && (folderSelectionPending || rawFolderBelongsToProject)
       ? rawFolderId
       : null;
   const fileScope = useMemo<FileListScope>(
@@ -73,6 +78,14 @@ export default function ProjectWorkspacePage() {
     const query = next.toString();
     router.replace(`/library/${projectId}${query ? `?${query}` : ''}` as Route);
   };
+
+  useEffect(() => {
+    if (folderSelectionInvalid) {
+      selectFolder(null);
+    }
+    // selectFolder closes over searchParams, so spell the stable parts out.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [folderSelectionInvalid, projectId, rawFolderId]);
 
   const addFolder = async () => {
     if (!newFolderName.trim()) return;
@@ -267,6 +280,12 @@ export default function ProjectWorkspacePage() {
             <Dropzone
               projectId={project.id}
               folderId={selectedFolderId}
+              disabled={folderSelectionPending || folderSelectionInvalid}
+              disabledReason={
+                folderSelectionPending
+                  ? 'Checking this folder before upload'
+                  : 'That folder was not found in this subject'
+              }
               onComplete={() => void invalidateFiles()}
             />
           </section>

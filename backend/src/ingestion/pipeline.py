@@ -26,7 +26,7 @@ from src.storage.db import ChunkMeta, get_engine, get_session
 from src.storage.vector_store import VectorItem, make_vector_store
 
 from .chunker import chunk_text
-from .extract import ExtractedSection, extract
+from .extract import ExtractedSection, detect_mime, extract
 
 log = logging.getLogger(__name__)
 
@@ -45,8 +45,9 @@ async def ingest_file(
     """Ingest one file end-to-end. Returns the chunk count."""
     blob = make_blob_store()
     local_path = blob.open_path(blob_key)
+    resolved_mime = detect_mime(local_path, fallback=mime)
 
-    sections = extract(local_path, mime=mime)
+    sections = extract(local_path, mime=resolved_mime)
     if not sections:
         log.info("ingest_file %s: no extractable text", file_id)
         return 0
@@ -55,7 +56,7 @@ async def ingest_file(
     chunks: list[str] = []
     metas: list[dict] = []
     ids: list[str] = []
-    is_image_mime = mime.startswith("image/")
+    is_image_mime = resolved_mime.startswith("image/")
     for section in sections:
         if is_image_mime:
             # VLM description ≈ a few hundred chars — keep as one chunk per image.

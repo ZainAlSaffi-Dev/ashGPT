@@ -127,6 +127,97 @@ async def test_local_upload_path_authz(client):
 
 
 @pytest.mark.asyncio
+async def test_scoped_local_upload_process_persists_project_folder(client, monkeypatch):
+    project = (
+        await client.post(
+            "/projects",
+            json={"name": "Evidence", "color": "#7a3b2e"},
+            headers=_auth_headers(),
+        )
+    ).json()
+    folder = (
+        await client.post(
+            f"/projects/{project['id']}/folders",
+            json={"name": "Week 1"},
+            headers=_auth_headers(),
+        )
+    ).json()
+    r = await client.post(
+        "/uploads/presign",
+        json={
+            "name": "notes.md",
+            "mime": "application/octet-stream",
+            "project_id": project["id"],
+            "folder_id": folder["id"],
+        },
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 200, r.text
+    presign = r.json()
+    await client.post(presign["upload_url"], content=b"# Notes\n\nEvidence Act", headers=_auth_headers())
+
+    captured: dict[str, object] = {}
+
+    async def fake_ingest_file(**kwargs):
+        captured.update(kwargs)
+        return 2
+
+    from src.ingestion import pipeline as pipeline_mod
+
+    monkeypatch.setattr(pipeline_mod, "ingest_file", fake_ingest_file)
+    r = await client.post(
+        f"/uploads/{presign['file_id']}/process",
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "ready"
+    assert r.json()["chunk_count"] == 2
+    assert captured["project_id"] == project["id"]
+    assert captured["folder_id"] == folder["id"]
+    assert captured["mime"] == "application/octet-stream"
+    assert captured["file_name"] == "notes.md"
+
+    r = await client.get(
+        f"/files?project_id={project['id']}&folder_id={folder['id']}",
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 200
+    scoped = r.json()
+    assert len(scoped) == 1
+    assert scoped[0]["id"] == presign["file_id"]
+    assert scoped[0]["project_id"] == project["id"]
+    assert scoped[0]["folder_id"] == folder["id"]
+    assert scoped[0]["status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_process_missing_blob_is_retryable_after_upload(client, monkeypatch):
+    r = await client.post(
+        "/uploads/presign",
+        json={"name": "late.txt", "mime": "text/plain"},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 200, r.text
+    presign = r.json()
+
+    r = await client.post(f"/uploads/{presign['file_id']}/process", headers=_auth_headers())
+    assert r.status_code == 409
+
+    await client.post(presign["upload_url"], content=b"late bytes", headers=_auth_headers())
+
+    from src.ingestion import pipeline as pipeline_mod
+
+    async def fake_ingest_file(**kwargs):
+        return 1
+
+    monkeypatch.setattr(pipeline_mod, "ingest_file", fake_ingest_file)
+    r = await client.post(f"/uploads/{presign['file_id']}/process", headers=_auth_headers())
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "ready"
+    assert r.json()["chunk_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_chat_streams_events(client):
     """Smoke: chat endpoint streams SSE without touching real models."""
     fake_state = {

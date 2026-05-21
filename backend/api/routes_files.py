@@ -149,7 +149,11 @@ async def process_upload(
     import asyncio
 
     row = (
-        await db.execute(select(FileRow).where(FileRow.id == file_id, FileRow.user_id == user.id))
+        await db.execute(
+            select(FileRow)
+            .where(FileRow.id == file_id, FileRow.user_id == user.id)
+            .with_for_update()
+        )
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, "file not found")
@@ -242,6 +246,8 @@ async def process_upload(
             folder_id=row.folder_id,
             file_name=row.name,
         )
+        if chunk_count <= 0:
+            raise ValueError("no extractable text found in this file")
         row.status = "ready"
         row.chunk_count = chunk_count
         row.last_indexed_at = _utcnow()

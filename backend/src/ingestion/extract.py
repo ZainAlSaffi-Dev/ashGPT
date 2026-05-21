@@ -158,7 +158,7 @@ def detect_mime(path: str | Path, fallback: str | None = None) -> str:
 
 def extract(path: str | Path, mime: str | None = None) -> list[ExtractedSection]:
     """Dispatch on MIME (or extension) to the right extractor."""
-    m = mime or detect_mime(path)
+    m = detect_mime(path, fallback=mime) if not mime or mime == "application/octet-stream" else mime
     if m == "application/pdf":
         return extract_pdf(path)
     if m == _DOCX_MIME:

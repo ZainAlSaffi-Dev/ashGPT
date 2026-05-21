@@ -3,8 +3,10 @@
     {
       "allowed": {
         "origins": [
-          "https://lawgpt-15s.pages.dev",
-          "http://localhost:3000"
+          "https://ashgpt.xyz",
+          "https://www.ashgpt.xyz",
+          "http://localhost:3000",
+          "http://127.0.0.1:3000"
         ],
         "methods": ["PUT", "GET", "HEAD"],
         "headers": [

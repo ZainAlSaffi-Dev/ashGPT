@@ -4,6 +4,7 @@ import {
   AuthNotReadyError,
   listSessions,
   setTokenProvider,
+  uploadBlob,
   withAuth,
 } from './api';
 
@@ -13,6 +14,58 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   setTokenProvider(null);
   vi.useRealTimers();
+});
+
+describe('uploadBlob', () => {
+  it('sends auth for same-origin API upload URLs', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await uploadBlob(
+      {
+        file_id: 'file-1',
+        upload_url: '/uploads/blob?key=usr_demo%2Fabc%2Fnotes.md',
+        blob_key: 'usr_demo/abc/notes.md',
+        method: 'PUT',
+      },
+      new Blob(['hello'], { type: '' }),
+      'token-1',
+      'text/markdown',
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/uploads/blob?key=usr_demo%2Fabc%2Fnotes.md');
+    expect(init?.method).toBe('PUT');
+    const headers = new Headers(init?.headers);
+    expect(headers.get('Authorization')).toBe('Bearer token-1');
+    expect(headers.get('Content-Type')).toBe('text/markdown');
+  });
+
+  it('keeps external presigned uploads unauthenticated', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await uploadBlob(
+      {
+        file_id: 'file-1',
+        upload_url: 'https://example.r2.cloudflarestorage.com/bucket/key',
+        blob_key: 'usr_demo/abc/notes.txt',
+        method: 'PUT',
+      },
+      new Blob(['hello'], { type: 'text/plain' }),
+      'token-1',
+    );
+
+    const init = fetchMock.mock.calls[0][1];
+    const headers = new Headers(init?.headers);
+    expect(headers.get('Authorization')).toBeNull();
+    expect(headers.get('Content-Type')).toBe('text/plain');
+  });
 });
 
 describe('withAuth', () => {
