@@ -9,14 +9,25 @@ const isPublic = createRouteMatcher([
   '/__clerk(.*)',
 ]);
 
+function hasClerkSessionCookie(req: Parameters<typeof isPublic>[0]): boolean {
+  return req.cookies.getAll().some((cookie) => {
+    const name = cookie.name;
+    return (
+      name === '__session' ||
+      name.startsWith('__session_') ||
+      name === '__client_uat' ||
+      name.startsWith('__client_uat_')
+    );
+  });
+}
+
 export default clerkMiddleware(
   async (auth, req) => {
     if (!isPublic(req)) {
-      const authState = await auth();
       const isPageNavigation =
         req.headers.get('sec-fetch-dest') === 'document' ||
         req.headers.get('accept')?.includes('text/html');
-      if (!authState.userId && isPageNavigation) {
+      if (!hasClerkSessionCookie(req) && isPageNavigation) {
         const signInUrl = new URL('/', req.url);
         signInUrl.searchParams.set('redirect_url', req.nextUrl.href);
         return NextResponse.redirect(signInUrl);
