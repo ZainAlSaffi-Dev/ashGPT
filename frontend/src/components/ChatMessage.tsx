@@ -1,16 +1,14 @@
 'use client';
 
+import React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 
 import { ChatMessageBody } from './ChatMessageBody';
 import { CitationContext, type CitationTarget } from './citation-context';
 import { CitationPopover, type CitationAnchor } from './CitationPopover';
 import { MermaidRenderer } from './MermaidRenderer';
 import { SourcePanel } from './SourcePanel';
-import { rehypeCitations } from '@/lib/rehype-citations';
 import type { ChatTurn } from '@/lib/useChat';
 import { cn, extractMermaid, withoutMermaid } from '@/lib/utils';
 
@@ -120,9 +118,7 @@ export function ChatMessage({ turn }: Props) {
               IRAC Analysis
             </h3>
             <div className="prose prose-sm max-w-none text-ink-muted prose-headings:font-serif prose-headings:text-ink prose-strong:text-ink">
-              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeCitations]}>
-                {turn.irac}
-              </ReactMarkdown>
+              <ChatMessageBody bodyMd={turn.irac} />
             </div>
           </section>
         )}

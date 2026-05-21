@@ -277,6 +277,7 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - Subject-chat and Pages deploy hardening: subject workspace chats now pre-create scoped sessions, `/chat/[sessionId]` rehydrates session scope before messages exist, global history hides subject chats, Mermaid loads client-side from CDN to shrink Cloudflare Pages Function output, frontend deploys use pnpm as the single package-manager path, and tests cover scoped session persistence.
 - Latency pass: scoped BM25 now enumerates only the selected project/folder/file rows, empty scoped chats short-circuit before LLM calls, chronology-only answers skip the final synthesis hop, and chat markdown tables get grid styling.
 - Vector DB resilience: pgvector search/list/write operations now retry once after transient SSL EOF connection drops and chat stream errors redact SQL plus embedding parameters.
+- IRAC citation UX: IRAC analysis now reuses the same `ChatMessageBody` citation renderer as normal chat answers, so `[S#]` chips open the source popover and `[external]` markers render consistently.
 
 ---
 

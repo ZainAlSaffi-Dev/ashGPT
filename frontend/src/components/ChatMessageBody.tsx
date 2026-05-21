@@ -1,5 +1,6 @@
 'use client';
 
+import React from 'react';
 import { memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
