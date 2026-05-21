@@ -2,7 +2,7 @@
 
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { SignInButton, SignedIn, SignedOut, useAuth } from '@clerk/nextjs';
+import { SignInButton, useAuth } from '@clerk/nextjs';
 import { motion } from 'framer-motion';
 import { BookMarked } from 'lucide-react';
 
@@ -52,16 +52,16 @@ export default function LandingPage() {
           Built for law students who want quick answers backed by their own readings.
         </p>
         <div className="mt-8 flex items-center justify-center gap-3">
-          <SignedOut>
+          {isLoaded && !isSignedIn && (
             <SignInButton mode="modal">
               <Button size="lg">Sign in</Button>
             </SignInButton>
-          </SignedOut>
-          <SignedIn>
+          )}
+          {isLoaded && isSignedIn && (
             <Button size="lg" asChild>
               <a href="/chat">Open the app</a>
             </Button>
-          </SignedIn>
+          )}
         </div>
         {/* While Clerk is hydrating (or while we're mid-redirect for a
             signed-in user) show a calm spinner instead of flashing the
