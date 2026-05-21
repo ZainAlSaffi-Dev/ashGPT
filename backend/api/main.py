@@ -29,6 +29,7 @@ from .routes_chat import router as chat_router
 from .routes_exam import router as exam_router
 from .routes_files import router as files_router
 from .routes_sessions import router as sessions_router
+from .routes_users import router as users_router
 
 load_dotenv()
 log = logging.getLogger("lawgpt")
@@ -97,3 +98,4 @@ app.include_router(chat_router)
 app.include_router(sessions_router)
 app.include_router(files_router)
 app.include_router(exam_router)
+app.include_router(users_router)

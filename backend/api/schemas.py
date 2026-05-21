@@ -103,3 +103,14 @@ class ExamGenerateRequest(BaseModel):
 
 class ExamSubmitRequest(BaseModel):
     answers: dict[str, Any]  # {question_id: chosen_idx | text}
+
+
+# ── Users ─────────────────────────────────────────────────────────────────────
+
+
+class UserMe(BaseModel):
+    id: str
+    clerk_id: str
+    email: str | None = None
+    onboarded_at: datetime | None = None
+    created_at: datetime

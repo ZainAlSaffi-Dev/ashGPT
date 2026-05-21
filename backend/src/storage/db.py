@@ -57,6 +57,7 @@ class User(Base):
     token_budget: Mapped[int] = mapped_column(Integer, default=1_000_000)
     tokens_used: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    onboarded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     files: Mapped[list["File"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     sessions: Mapped[list["Session"]] = relationship(back_populates="user", cascade="all, delete-orphan")
@@ -269,6 +270,7 @@ async def _apply_inline_migrations(conn) -> None:  # type: ignore[no-untyped-def
         "ALTER TABLE messages ADD COLUMN IF NOT EXISTS sources JSONB",
         "ALTER TABLE messages ADD COLUMN IF NOT EXISTS irac TEXT",
         "ALTER TABLE messages ADD COLUMN IF NOT EXISTS mermaid TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarded_at TIMESTAMPTZ",
     )
     for stmt in statements:
         await conn.execute(text(stmt))
