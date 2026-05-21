@@ -14,7 +14,6 @@
  */
 
 import { visit } from 'unist-util-visit';
-import type { Plugin } from 'unified';
 import type { Root, Text, Element } from 'hast';
 
 const CITE_RE = /\[S(\d+)\]/g;
@@ -88,7 +87,12 @@ function splitTextNode(node: Text, ctx: SplitCtx): (Text | Element)[] {
   return out;
 }
 
-export const rehypeCitations: Plugin<[], Root> = () => (tree) => {
+type RehypeTransformer = (tree: Root) => void;
+
+// Plain factory signature (no ``unified`` type import — it's a transitive
+// dependency and resolves at runtime, but the type isn't in package.json so
+// strict ``pnpm install`` on CF Pages can't find it during the TS build).
+export const rehypeCitations: () => RehypeTransformer = () => (tree) => {
   // Fresh per-render context: counters reset every time react-markdown
   // re-renders (every streamed token), so the same occurrence ids stay
   // stable across re-renders of the same prose.
