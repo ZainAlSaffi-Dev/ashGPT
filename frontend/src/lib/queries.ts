@@ -12,6 +12,7 @@ import {
 
 import {
   deleteSession,
+  getSession,
   getMe,
   listFolders,
   listFiles,
@@ -39,6 +40,7 @@ export const projectKeys = {
   folders: (projectId: string | null | undefined) => ['folders', projectId ?? null] as const,
   files: (scope: FileListScope = {}) => ['files', fileScopeKey(scope)] as const,
   sessions: (projectId?: string | null) => ['sessions', projectId ?? null] as const,
+  session: (sessionId: string | null | undefined) => ['session', sessionId ?? null] as const,
 };
 
 export function useProjects(options: QueryGateOptions = {}) {
@@ -106,6 +108,19 @@ export function useSessions(options: QueryGateOptions & { projectId?: string | n
     queryFn: () => withAuth(getToken, (token) => listSessions(token, { projectId: options.projectId })),
     // Sidebar list shouldn't flicker on tab focus; it's append-only mostly
     // and gets invalidated on create/delete.
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
+  });
+}
+
+export function useSession(sessionId: string | null | undefined, options: QueryGateOptions = {}) {
+  const { getToken } = useAuth();
+  const authReady = useAuthReady();
+  return useQuery({
+    queryKey: projectKeys.session(sessionId),
+    enabled: authReady && !!sessionId && options.enabled !== false,
+    queryFn: () => withAuth(getToken, (token) => getSession(sessionId!, token)),
     staleTime: 5 * 60_000,
     refetchOnWindowFocus: false,
     refetchOnMount: false,

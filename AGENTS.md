@@ -140,7 +140,7 @@ When the user opens an old chat, `frontend/src/app/(app)/chat/[sessionId]/page.t
 
 **Pages dashboard build config** (also valid for manual setup):
 - Root dir: `frontend`
-- Build command: `npx @cloudflare/next-on-pages@1`
+- Build command: `pnpm dlx @cloudflare/next-on-pages@1`
 - Build output: `.vercel/output/static`
 - Compatibility flags (Production + Preview): `nodejs_compat`
 - Node: 20
@@ -149,10 +149,10 @@ When the user opens an old chat, `frontend/src/app/(app)/chat/[sessionId]/page.t
 
 ```bash
 cd frontend
-npm ci
+pnpm install --frozen-lockfile
 NEXT_PUBLIC_API_BASE=https://api.ashgpt.xyz \
 NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_live_Y2xlcmsuYXNoZ3B0Lnh5eiQ \
-npx @cloudflare/next-on-pages@1
+pnpm dlx @cloudflare/next-on-pages@1
 npx wrangler pages deploy .vercel/output/static --project-name=ashgpt --branch=main
 ```
 
@@ -213,6 +213,8 @@ Backend container picks up the same `[vars]` block as the worker (single `infra/
 11. **Landing redirect must not wait on `getToken()`** — after modal sign-in, navigate as soon as Clerk reports `isSignedIn`; token readiness is handled by authed query gates. Waiting for a token on `/` can leave the user on the spinner until manual refresh.
 12. **Route transitions inside the app shell must be enter-only** — `AppShell` scrolls inside a custom `<main>`, so an exiting `AnimatePresence` route left in normal flow stacks the old page above the new one and makes workspace pages look blank until you scroll.
 13. **Uploads should stay on the API origin** — browser → R2 direct PUTs are fragile because bucket CORS and signed `Content-Type` must match exactly. Production uploads now use an authenticated Worker `/uploads/blob` URL; keep Dropzone on `withAuth`, clean up the placeholder file row when blob upload fails, and disable subject uploads until a `?folder=` param is validated.
+14. **Client-only giants still affect Pages Functions** — `@cloudflare/next-on-pages` can hoist dynamic client imports into the generated Pages Function modules. Mermaid is loaded from jsDelivr in `MermaidRenderer` to keep the Function bundle under Cloudflare's publish limits; don't switch it back to `import('mermaid')` without checking `_worker.js` sizes.
+15. **Dashboard Pages deploys can fail after successful asset upload** — `Failed to publish your Function. Got error: Unknown internal error occurred.` usually means the generated Pages Function publish failed, not that Next failed. First compare module sizes in `.vercel/output/static/_worker.js`; GitHub Actions direct upload with Wrangler 4 is still the source-of-truth deploy path.
 
 ## Backend gotchas
 
@@ -241,7 +243,7 @@ cd backend && python -m pytest -q
 cd backend && uvicorn api.main:app --reload --port 8000
 
 # Manual deploy (Pages)
-cd frontend && npx @cloudflare/next-on-pages@1 && npx wrangler pages deploy .vercel/output/static --project-name=ashgpt --branch=main
+cd frontend && pnpm dlx @cloudflare/next-on-pages@1 && npx wrangler pages deploy .vercel/output/static --project-name=ashgpt --branch=main
 ```
 
 ---
@@ -269,6 +271,7 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - Workspace navigation polish: route transitions are enter-only and the app shell resets its internal scroll container on pathname changes so subject workspace pages open at the top instead of stacking below the previous page.
 - Project workspace sessions: subject pages now show a scoped recent-chats panel with resume links and a new subject-chat action backed by `useSessions({ projectId })`.
 - Upload hardening: production uploads now stream through authenticated Worker `/uploads/blob` into R2 instead of direct browser → R2 CORS PUTs; Dropzone waits for Clerk tokens, validates/rejects unsupported files visibly, cleans up failed placeholder rows, blocks invalid folder scopes, and backend tests cover scoped upload/process retry.
+- Subject-chat and Pages deploy hardening: subject workspace chats now pre-create scoped sessions, `/chat/[sessionId]` rehydrates session scope before messages exist, global history hides subject chats, Mermaid loads client-side from CDN to shrink Cloudflare Pages Function output, frontend deploys use pnpm as the single package-manager path, and tests cover scoped session persistence.
 
 ---
 

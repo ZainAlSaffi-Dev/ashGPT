@@ -2,15 +2,17 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { useAuth } from '@clerk/nextjs';
 import { useQueryClient } from '@tanstack/react-query';
 import type { Route } from 'next';
-import { Send } from 'lucide-react';
+import { BookOpen, FolderOpen, Send } from 'lucide-react';
 
 import { ChatMessage } from '@/components/ChatMessage';
 import { OnboardingChecklist } from '@/components/OnboardingChecklist';
 import { SkeletonList } from '@/components/ui/Skeleton';
+import { createSession, withAuth } from '@/lib/api';
 import { turnsToCachedMessages, upsertCachedSession } from '@/lib/chat-cache';
-import { projectKeys, useOnboarding } from '@/lib/queries';
+import { projectKeys, useFolders, useOnboarding, useProjects } from '@/lib/queries';
 import { useChat, type ChatTurn } from '@/lib/useChat';
 import type { Message, RetrievalScope, SessionSummary } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -23,6 +25,19 @@ export interface ChatSurfaceProps {
   /** True while a known session's history is loading for the first time. */
   historyLoading?: boolean;
   scope?: RetrievalScope | null;
+  session?: SessionSummary | null;
+}
+
+function projectIdFromScope(scope: RetrievalScope | null | undefined): string | null {
+  return scope && 'project_id' in scope ? scope.project_id ?? null : null;
+}
+
+function folderIdFromScope(scope: RetrievalScope | null | undefined): string | null {
+  return scope && 'folder_id' in scope ? scope.folder_id ?? null : null;
+}
+
+function isScoped(scope: RetrievalScope | null | undefined): boolean {
+  return !!scope && scope.type !== 'all';
 }
 
 /**
@@ -36,26 +51,60 @@ export function ChatSurface({
   initialTurns,
   historyLoading = false,
   scope = null,
+  session = null,
 }: ChatSurfaceProps) {
   const router = useRouter();
+  const { getToken } = useAuth();
   const queryClient = useQueryClient();
+  const [creatingChat, setCreatingChat] = useState(false);
+  const activeScope = scope ?? session?.scope ?? null;
+  const scoped = isScoped(activeScope);
+  const projectId = projectIdFromScope(activeScope);
+  const folderId = folderIdFromScope(activeScope);
+  const projectsQuery = useProjects({ enabled: scoped });
+  const foldersQuery = useFolders(projectId, { enabled: scoped && !!projectId });
+  const project = projectsQuery.data?.find((item) => item.id === projectId);
+  const folder = foldersQuery.data?.find((item) => item.id === folderId);
+  const scopeLabel = folder?.name
+    ? `${project?.name ?? 'Subject'} / ${folder.name}`
+    : project?.name ?? (scoped ? 'Subject chat' : null);
 
   const { turns, send, busy, nodeTrace, sessionId } = useChat({
     initialSessionId,
     initialTurns,
-    scope,
+    scope: activeScope,
     onTurnCommitted: (id, committedTurns) => {
       queryClient.setQueryData<Message[]>(
         ['messages', id],
         turnsToCachedMessages(committedTurns),
       );
-      queryClient.setQueryData<SessionSummary[]>(projectKeys.sessions(null), (sessions) =>
-        upsertCachedSession(sessions, id, committedTurns),
-      );
-      if (scope && 'project_id' in scope && scope.project_id) {
+      queryClient.setQueryData<SessionSummary>(projectKeys.session(id), (existing) => ({
+        id,
+        title: existing?.title
+          ?? committedTurns.find((turn) => turn.role === 'user')?.content
+          ?? 'New chat',
+        created_at: existing?.created_at ?? new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        project_id: projectId ?? existing?.project_id ?? null,
+        folder_id: folderId ?? existing?.folder_id ?? null,
+        scope: activeScope ?? existing?.scope ?? null,
+      }));
+      queryClient.setQueryData<SessionSummary[]>(projectKeys.sessions(null), (sessions) => {
+        const next = upsertCachedSession(sessions, id, committedTurns, undefined, {
+          project_id: projectId,
+          folder_id: folderId,
+          scope: activeScope,
+        });
+        return next.filter((item) => !item.project_id);
+      });
+      if (projectId) {
         queryClient.setQueryData<SessionSummary[]>(
-          projectKeys.sessions(scope.project_id),
-          (sessions) => upsertCachedSession(sessions, id, committedTurns),
+          projectKeys.sessions(projectId),
+          (sessions) => upsertCachedSession(sessions, id, committedTurns, undefined, {
+            project_id: projectId,
+            folder_id: folderId,
+            scope: activeScope,
+          }),
         );
       }
     },
@@ -69,6 +118,37 @@ export function ChatSurface({
   const onboarding = useOnboarding({
     enabled: !historyLoading && turns.length === 0,
   });
+
+  const startNewChat = async () => {
+    if (busy || creatingChat) return;
+    if (!scoped) {
+      router.push('/chat');
+      return;
+    }
+    setCreatingChat(true);
+    try {
+      await withAuth(getToken, async (token) => {
+        const next = await createSession('New subject chat', token, {
+          projectId,
+          folderId,
+          scope: activeScope,
+        });
+        queryClient.setQueryData(projectKeys.session(next.id), next);
+        if (projectId) {
+          queryClient.setQueryData<SessionSummary[]>(projectKeys.sessions(projectId), (sessions) => [
+            next,
+            ...(sessions ?? []).filter((item) => item.id !== next.id),
+          ]);
+        }
+        queryClient.setQueryData<SessionSummary[]>(projectKeys.sessions(null), (sessions) =>
+          (sessions ?? []).filter((item) => item.id !== next.id && !item.project_id),
+        );
+        router.push(`/chat/${next.id}` as Route);
+      });
+    } finally {
+      setCreatingChat(false);
+    }
+  };
 
   // Once a streamed turn lands, invalidate the cached message history for
   // this session so a tab reload / browser-back fetches the persisted
@@ -124,18 +204,26 @@ export function ChatSurface({
   return (
     <div className="mx-auto flex h-full w-full max-w-5xl flex-col px-4 py-6 lg:px-8">
       <div className="mb-4 flex items-center justify-between">
-        <h1 className="font-serif text-2xl text-ink">Chat</h1>
+        <div className="min-w-0">
+          <h1 className="truncate font-serif text-2xl text-ink">
+            {scopeLabel ?? 'Chat'}
+          </h1>
+          {scoped && (
+            <p className="mt-1 flex items-center gap-1.5 text-sm text-ink-muted">
+              {folder ? <FolderOpen className="h-3.5 w-3.5" /> : <BookOpen className="h-3.5 w-3.5" />}
+              Answers are scoped to this {folder ? 'folder' : 'subject'}.
+            </p>
+          )}
+        </div>
         <button
-          onClick={() => {
-            if (!busy) router.push('/chat');
-          }}
-          disabled={busy}
+          onClick={startNewChat}
+          disabled={busy || creatingChat}
           className={cn(
             'text-sm text-ink-muted hover:text-accent',
-            busy && 'cursor-not-allowed opacity-50',
+            (busy || creatingChat) && 'cursor-not-allowed opacity-50',
           )}
         >
-          New chat
+          {scoped ? 'New subject chat' : 'New chat'}
         </button>
       </div>
 
@@ -161,8 +249,12 @@ export function ChatSurface({
               </p>
               <p className="mt-2 text-sm">
                 {!onboarding.isLoading && onboarding.readyFilesCount === 0
-                  ? 'Chat answers are grounded in the documents in your library.'
-                  : 'Ask anything grounded in your uploaded notes, cases, or statutes.'}
+                  ? scoped
+                    ? 'Upload files to this subject, then ask scoped questions here.'
+                    : 'Chat answers are grounded in the documents in your library.'
+                  : scoped
+                    ? 'This chat will only use documents in the selected subject scope.'
+                    : 'Ask anything grounded in your uploaded notes, cases, or statutes.'}
               </p>
             </div>
           </>

@@ -162,6 +162,9 @@ export const listSessions = (token?: string, options: { projectId?: string | nul
     token,
   );
 
+export const getSession = (sessionId: string, token?: string) =>
+  request<SessionSummary>(`/sessions/${sessionId}`, { method: 'GET' }, token);
+
 export const createSession = (
   title: string | null,
   token?: string,

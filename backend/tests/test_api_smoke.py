@@ -61,6 +61,10 @@ async def test_sessions_lifecycle(client):
     assert r.status_code == 201, r.text
     session_id = r.json()["id"]
 
+    r = await client.get(f"/sessions/{session_id}", headers=_auth_headers())
+    assert r.status_code == 200
+    assert r.json()["id"] == session_id
+
     r = await client.get("/sessions", headers=_auth_headers())
     assert r.status_code == 200
     titles = [s["title"] for s in r.json()]
@@ -263,3 +267,72 @@ async def test_explicit_scope_on_legacy_session_is_rejected(client):
     )
 
     assert r.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_scoped_session_chat_uses_persisted_scope(client):
+    project = (
+        await client.post("/projects", json={"name": "Torts"}, headers=_auth_headers())
+    ).json()
+    session = (
+        await client.post(
+            "/sessions",
+            json={
+                "title": "New subject chat",
+                "project_id": project["id"],
+                "scope": {"type": "project", "project_id": project["id"]},
+            },
+            headers=_auth_headers(),
+        )
+    ).json()
+
+    r = await client.get(f"/sessions/{session['id']}", headers=_auth_headers())
+    assert r.status_code == 200
+    assert r.json()["project_id"] == project["id"]
+    assert r.json()["scope"] == {"type": "project", "project_id": project["id"]}
+
+    captured: dict[str, object] = {}
+    fake_state = {
+        "node_trace": ["router", "retrieval", "synthesis"],
+        "intent": "general",
+        "retrieved_texts": [
+            {
+                "source": "torts.md",
+                "file_id": "file_1",
+                "project_id": project["id"],
+                "doc_type": "note",
+                "week": None,
+                "content": "negligence notes",
+            }
+        ],
+        "retrieved_slides": [],
+        "final_answer": "Duty of care is assessed in context.",
+        "verification_report": {"all_supported": True},
+    }
+
+    def fake_run_query(**kwargs):
+        captured.update(kwargs)
+        return fake_state
+
+    with patch("api.routes_chat.run_query", side_effect=fake_run_query):
+        async with client.stream(
+            "POST",
+            "/chat",
+            json={"query": "What is duty of care?", "session_id": session["id"]},
+            headers=_auth_headers(),
+        ) as resp:
+            assert resp.status_code == 200
+            await resp.aread()
+
+    assert captured["scope"] == {"type": "project", "project_id": project["id"]}
+
+    r = await client.get(f"/sessions/{session['id']}", headers=_auth_headers())
+    assert r.status_code == 200
+    assert r.json()["title"] == "What is duty of care?"
+
+    r = await client.get(f"/sessions/{session['id']}/messages", headers=_auth_headers())
+    assert r.status_code == 200
+    messages = r.json()
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert all(m["scope"] == {"type": "project", "project_id": project["id"]} for m in messages)
+    assert messages[-1]["sources"][0]["project_id"] == project["id"]

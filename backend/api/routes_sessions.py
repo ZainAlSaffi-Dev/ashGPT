@@ -97,6 +97,22 @@ async def create_session(
     return _session_out(session)
 
 
+@router.get("/{session_id}", response_model=SessionOut)
+async def get_session(
+    session_id: Annotated[str, Path()],
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[AsyncSession, Depends(db_session)],
+) -> SessionOut:
+    sess = (
+        await db.execute(
+            select(Session).where(Session.id == session_id, Session.user_id == user.id)
+        )
+    ).scalar_one_or_none()
+    if sess is None:
+        raise HTTPException(404, "session not found")
+    return _session_out(sess)
+
+
 @router.get("/{session_id}/messages", response_model=list[MessageOut])
 async def list_messages(
     session_id: Annotated[str, Path()],

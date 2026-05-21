@@ -71,4 +71,19 @@ describe('upsertCachedSession', () => {
     expect(sessions[0].created_at).toBe('b-created');
     expect(sessions[0].updated_at).toBe('now');
   });
+
+  it('stores scoped subject metadata on the cached session row', () => {
+    const sessions = upsertCachedSession(undefined, 'scoped', turns, 'now', {
+      project_id: 'project-1',
+      folder_id: 'folder-1',
+      scope: { type: 'folder', project_id: 'project-1', folder_id: 'folder-1' },
+    });
+
+    expect(sessions[0]).toMatchObject({
+      id: 'scoped',
+      project_id: 'project-1',
+      folder_id: 'folder-1',
+      scope: { type: 'folder', project_id: 'project-1', folder_id: 'folder-1' },
+    });
+  });
 });

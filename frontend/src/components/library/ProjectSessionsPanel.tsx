@@ -2,13 +2,17 @@
 
 import React from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { useAuth } from '@clerk/nextjs';
+import { useQueryClient } from '@tanstack/react-query';
 import type { Route } from 'next';
 import { ArrowUpRight, MessageSquare, Sparkles } from 'lucide-react';
 
 import { Button } from '@/components/ui/Button';
 import { SkeletonList } from '@/components/ui/Skeleton';
-import { useSessions } from '@/lib/queries';
-import type { SessionSummary } from '@/lib/types';
+import { createSession, withAuth } from '@/lib/api';
+import { projectKeys, useSessions } from '@/lib/queries';
+import type { RetrievalScope, SessionSummary } from '@/lib/types';
 
 function formatSessionDate(value: string) {
   return new Intl.DateTimeFormat(undefined, {
@@ -19,12 +23,13 @@ function formatSessionDate(value: string) {
   }).format(new Date(value));
 }
 
-export function ProjectSessionsPanel({ projectId }: { projectId: string }) {
+export function ProjectSessionsPanel({ projectId, folderId = null }: { projectId: string; folderId?: string | null }) {
   const sessionsQuery = useSessions({ projectId });
 
   return (
     <ProjectSessionsPanelContent
       projectId={projectId}
+      folderId={folderId}
       sessions={sessionsQuery.data ?? []}
       isLoading={sessionsQuery.isLoading}
     />
@@ -33,15 +38,48 @@ export function ProjectSessionsPanel({ projectId }: { projectId: string }) {
 
 export function ProjectSessionsPanelContent({
   projectId,
+  folderId = null,
   sessions,
   isLoading,
 }: {
   projectId: string;
+  folderId?: string | null;
   sessions: SessionSummary[];
   isLoading: boolean;
 }) {
-  const chatHref = `/chat?project=${projectId}` as Route;
+  const router = useRouter();
+  const { getToken } = useAuth();
+  const queryClient = useQueryClient();
+  const [creating, setCreating] = React.useState(false);
+  const scope: RetrievalScope = folderId
+    ? { type: 'folder', project_id: projectId, folder_id: folderId }
+    : { type: 'project', project_id: projectId };
   const visibleSessions = sessions.slice(0, 5);
+
+  const startSubjectChat = async () => {
+    if (creating) return;
+    setCreating(true);
+    try {
+      await withAuth(getToken, async (token) => {
+        const session = await createSession('New subject chat', token, {
+          projectId,
+          folderId,
+          scope,
+        });
+        queryClient.setQueryData(projectKeys.session(session.id), session);
+        queryClient.setQueryData<SessionSummary[]>(projectKeys.sessions(projectId), (old) => [
+          session,
+          ...(old ?? []).filter((item) => item.id !== session.id),
+        ]);
+        queryClient.setQueryData<SessionSummary[]>(projectKeys.sessions(null), (old) =>
+          (old ?? []).filter((item) => item.id !== session.id && !item.project_id),
+        );
+        router.push(`/chat/${session.id}` as Route);
+      });
+    } finally {
+      setCreating(false);
+    }
+  };
 
   return (
     <section className="mb-8 border-b border-parchment-warm pb-7">
@@ -53,11 +91,9 @@ export function ProjectSessionsPanelContent({
             <p className="text-sm text-ink-muted">Resume conversations tied to this subject.</p>
           </div>
         </div>
-        <Button asChild size="sm">
-          <Link href={chatHref}>
-            <MessageSquare className="h-4 w-4" />
-            New subject chat
-          </Link>
+        <Button size="sm" onClick={startSubjectChat} disabled={creating}>
+          <MessageSquare className="h-4 w-4" />
+          {creating ? 'Creating...' : 'New subject chat'}
         </Button>
       </div>
 

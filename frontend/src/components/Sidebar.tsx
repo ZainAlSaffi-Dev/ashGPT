@@ -53,6 +53,7 @@ export function Sidebar() {
   const [pendingDelete, setPendingDelete] = useState<SessionSummary | null>(null);
   const [subjectsOpen, setSubjectsOpen] = useState(true);
   const projects = projectsQuery.data ?? [];
+  const globalSessions = (sessionsQuery.data ?? []).filter((session) => !session.project_id);
 
   const confirmDelete = () => {
     if (!pendingDelete) return;
@@ -164,7 +165,7 @@ export function Sidebar() {
 
       <div className="mt-2 flex-1 overflow-y-auto">
         <SessionList
-          sessions={sessionsQuery.data ?? []}
+          sessions={globalSessions}
           activePath={pathname}
           isLoading={sessionsQuery.isLoading}
           onDelete={(s) => setPendingDelete(s)}

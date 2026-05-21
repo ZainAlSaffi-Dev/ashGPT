@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   AuthNotReadyError,
+  createSession,
+  getSession,
   listSessions,
   setTokenProvider,
   uploadBlob,
@@ -142,5 +144,68 @@ describe('request 401 replay', () => {
     setTokenProvider(null);
     await expect(listSessions('stale')).rejects.toThrow(/API 401/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('scoped sessions API', () => {
+  it('creates a project-scoped session with scope metadata', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: 's1',
+          title: 'New subject chat',
+          project_id: 'p1',
+          folder_id: null,
+          scope: { type: 'project', project_id: 'p1' },
+          created_at: '2026-01-01',
+          updated_at: '2026-01-01',
+        }),
+        { status: 201, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const session = await createSession('New subject chat', 'token-1', {
+      projectId: 'p1',
+      scope: { type: 'project', project_id: 'p1' },
+    });
+
+    expect(session.project_id).toBe('p1');
+    expect(session.scope).toEqual({ type: 'project', project_id: 'p1' });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/sessions');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      title: 'New subject chat',
+      project_id: 'p1',
+      scope: { type: 'project', project_id: 'p1' },
+    });
+  });
+
+  it('fetches one session for scope rehydration', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: 's1',
+          title: 'Contracts',
+          project_id: 'p1',
+          folder_id: null,
+          scope: { type: 'project', project_id: 'p1' },
+          created_at: '2026-01-01',
+          updated_at: '2026-01-01',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const session = await getSession('s1', 'token-1');
+
+    expect(session.id).toBe('s1');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/sessions/s1');
+    expect(init?.method).toBe('GET');
+    expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer token-1');
   });
 });

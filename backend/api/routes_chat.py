@@ -113,6 +113,10 @@ async def _load_history(db: AsyncSession, session_id: str) -> list[dict[str, str
     return [{"role": m.role, "content": m.content} for m in rows]
 
 
+def _should_autotitle_session(session: Session, history: list[dict[str, str]]) -> bool:
+    return not history and session.title in {"New chat", "New subject chat"}
+
+
 @router.post("/chat")
 async def chat(
     body: ChatRequest,
@@ -121,6 +125,8 @@ async def chat(
 ) -> EventSourceResponse:
     session = await _ensure_session(db, user, body.session_id, fallback_title=body.query, scope=body.scope)
     history = await _load_history(db, session.id)
+    if _should_autotitle_session(session, history):
+        session.title = body.query[:80] or session.title
 
     user_msg = Message(
         session_id=session.id, user_id=user.id, role="user", content=body.query, scope=session.scope

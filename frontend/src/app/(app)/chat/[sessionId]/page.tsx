@@ -3,7 +3,7 @@
 import { use } from 'react';
 
 import { ChatSurface } from '@/components/ChatSurface';
-import { useMessages } from '@/lib/queries';
+import { useMessages, useSession } from '@/lib/queries';
 import type { ChatTurn } from '@/lib/useChat';
 
 export const runtime = 'edge';
@@ -20,6 +20,7 @@ export default function ChatSessionPage({ params }: PageProps) {
   // first uncached visit; in that case we still mount ChatSurface with no
   // turns so the composer is interactive while the messages stream in.
   const messagesQuery = useMessages(sessionId);
+  const sessionQuery = useSession(sessionId);
   const messages = messagesQuery.data;
   const historyLoading = !messages && messagesQuery.isLoading;
 
@@ -42,7 +43,7 @@ export default function ChatSessionPage({ params }: PageProps) {
     verification: m.verification ?? undefined,
     latency_ms: m.latency_ms ?? undefined,
   }));
-  const scope = messages?.find((m) => m.scope)?.scope ?? null;
+  const scope = sessionQuery.data?.scope ?? messages?.find((m) => m.scope)?.scope ?? null;
 
   return (
     <ChatSurface
@@ -50,6 +51,7 @@ export default function ChatSessionPage({ params }: PageProps) {
       initialTurns={messages ? turns : undefined}
       historyLoading={historyLoading}
       scope={scope}
+      session={sessionQuery.data ?? null}
     />
   );
 }

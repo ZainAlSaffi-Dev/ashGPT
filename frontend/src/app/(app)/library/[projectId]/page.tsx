@@ -240,7 +240,7 @@ export default function ProjectWorkspacePage() {
         </aside>
 
         <main className="min-w-0">
-          <ProjectSessionsPanel projectId={project.id} />
+          <ProjectSessionsPanel projectId={project.id} folderId={selectedFolderId} />
 
           <section>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
