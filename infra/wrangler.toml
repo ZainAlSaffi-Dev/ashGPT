@@ -62,9 +62,11 @@ new_sqlite_classes = ["LawgptBackend"]
 # ── Public-facing vars (non-secret) ──────────────────────────────────────────
 
 [vars]
-# Production Clerk instance on the custom domain ``clerk.ashgpt.xyz``.
-# JWKS is derived as ``<CLERK_ISSUER>/.well-known/jwks.json``.
-CLERK_ISSUER = "https://clerk.ashgpt.xyz"
+# TEMPORARY revert to the dev/test Clerk instance — see
+# ``frontend/wrangler.toml`` for the why. Flip CLERK_ISSUER back to
+# ``https://clerk.ashgpt.xyz`` once Clerk's production edge fully
+# activates (asset bundle currently RST'd).
+CLERK_ISSUER = "https://solid-fly-14.clerk.accounts.dev"
 CORS_ORIGINS = "https://ashgpt.xyz,https://www.ashgpt.xyz,https://ashgpt.pages.dev,http://localhost:3000"
 R2_BUCKET = "lawgpt-uploads"
 R2_ACCOUNT_ID = "b7fc20f146b05722922360bd1310aa3a"
