@@ -24,6 +24,7 @@ compatibility_flags = ["nodejs_compat"]
 # Custom Domain), flip the value below to the custom subdomain.
 
 [vars]
+NODE_VERSION = "20"
 NEXT_PUBLIC_API_BASE = "https://api.ashgpt.xyz"
 NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_live_Y2xlcmsuYXNoZ3B0Lnh5eiQ"
 NEXT_PUBLIC_CLERK_JS_URL = "https://cdn.jsdelivr.net/npm/@clerk/clerk-js@6.11.3/dist/clerk.browser.js"

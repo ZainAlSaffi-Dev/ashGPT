@@ -63,6 +63,8 @@ also grant the token `Zone: Read` and `Workers Routes: Edit` for `ashgpt.xyz`.
 Frontend deploys must use `wrangler pages deploy .vercel/output/static`.
 Plain `wrangler deploy` is for Workers, not Pages; from `frontend/` it fails
 with "Missing entry-point to Worker script or to assets directory".
+The frontend Pages config pins `NODE_VERSION=20` in `frontend/wrangler.toml`
+so dashboard builds do not drift to newer build-image Node defaults than CI.
 
 Workflows:
 

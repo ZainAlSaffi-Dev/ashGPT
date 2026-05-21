@@ -170,7 +170,7 @@ Public-build vars (`NEXT_PUBLIC_*`) live in `frontend/wrangler.toml`'s `[vars]` 
 - `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` → `pk_live_Y2xlcmsuYXNoZ3B0Lnh5eiQ` (wrangler.toml)
 - `NEXT_PUBLIC_CLERK_PROXY_URL` → `https://ashgpt.xyz/__clerk/` (wrangler.toml). Clerk production domain is configured to use this proxy URL; browser Clerk traffic should stay same-origin through `ashgpt.xyz/__clerk`.
 - `CLERK_SECRET_KEY` → **secret** `sk_live_…` (Pages dashboard → encrypted env vars, **not** in wrangler.toml)
-- `NODE_VERSION` → `20` (dashboard)
+- `NODE_VERSION` → `20` (frontend/wrangler.toml). Keep Cloudflare Pages on Node 20; dashboard default images may drift ahead and produce different Next/Pages function output than CI.
 - Pages deploys must use `wrangler pages deploy .vercel/output/static` (or the GitHub Action). Running plain `wrangler deploy` from `frontend/` is a Worker deploy and fails with "Missing entry-point to Worker script or to assets directory"; do not "fix" that by adding `main` or `[assets]` to the Pages config.
 
 ### Worker (`lawgpt-edge`, `infra/wrangler.toml`)
