@@ -26,12 +26,16 @@ import { useAuthReady } from './useAuthReady';
  *  Polls every 4 s while any file is still in a non-terminal status
  *  (``uploaded`` / ``processing`` / ``queued``) so the user sees the
  *  transition to ``ready`` without manual refresh. */
-export function useFiles() {
+interface QueryGateOptions {
+  enabled?: boolean;
+}
+
+export function useFiles(options: QueryGateOptions = {}) {
   const { getToken } = useAuth();
   const authReady = useAuthReady();
   return useQuery({
     queryKey: ['files'],
-    enabled: authReady,
+    enabled: authReady && options.enabled !== false,
     queryFn: () => withAuth(getToken, (token) => listFiles(token)),
     // Fallback so an in-flight file that never reaches a terminal status
     // still gets revalidated on revisit, instead of polling forever.
@@ -51,16 +55,16 @@ export function useFiles() {
   });
 }
 
-export function useSessions() {
+export function useSessions(options: QueryGateOptions = {}) {
   const { getToken } = useAuth();
   const authReady = useAuthReady();
   return useQuery({
     queryKey: ['sessions'],
-    enabled: authReady,
+    enabled: authReady && options.enabled !== false,
     queryFn: () => withAuth(getToken, (token) => listSessions(token)),
     // Sidebar list shouldn't flicker on tab focus; it's append-only mostly
     // and gets invalidated on create/delete.
-    staleTime: 60_000,
+    staleTime: 5 * 60_000,
     refetchOnWindowFocus: false,
     refetchOnMount: false,
     placeholderData: keepPreviousData,
@@ -78,11 +82,12 @@ export function useMessages(sessionId: string | null | undefined) {
     // shouldn't trigger a refetch on focus. New turns are pushed into
     // local useChat state and invalidated by ChatSurface when the
     // assistant message is committed server-side.
-    staleTime: 60_000,
+    staleTime: 5 * 60_000,
     gcTime: 10 * 60_000,
-    // Reopening an old chat must paint from cache — no spinner flash.
+    // Reopening an old chat paints from that session's own cache. Do not use
+    // keepPreviousData here: during rapid session switches it can briefly show
+    // the previous conversation under the new URL.
     refetchOnMount: false,
-    placeholderData: keepPreviousData,
   });
 }
 
@@ -165,9 +170,10 @@ export interface OnboardingState {
   isLoading: boolean;
 }
 
-export function useOnboarding(): OnboardingState {
-  const filesQuery = useFiles();
-  const sessionsQuery = useSessions();
+export function useOnboarding(options: QueryGateOptions = {}): OnboardingState {
+  const enabled = options.enabled !== false;
+  const filesQuery = useFiles({ enabled });
+  const sessionsQuery = useSessions({ enabled });
 
   const filesCount = filesQuery.data?.length ?? 0;
   const readyFilesCount =
@@ -185,6 +191,6 @@ export function useOnboarding(): OnboardingState {
     sessionsCount,
     step,
     isComplete: step === 'done',
-    isLoading: filesQuery.isLoading || sessionsQuery.isLoading,
+    isLoading: enabled && (filesQuery.isLoading || sessionsQuery.isLoading),
   };
 }

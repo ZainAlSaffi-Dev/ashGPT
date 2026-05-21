@@ -206,6 +206,8 @@ Backend container picks up the same `[vars]` block as the worker (single `infra/
 5. **`unified` is a transitive dep**, not a direct one. Don't import types from it — the Pages build's stricter pnpm install will fail typecheck. Type rehype transformers as plain `(tree: Root) => void`.
 6. **Edit vs Write** — `Write` requires you to `Read` the file first in the same session. `Edit` requires the same. Cheap mistake to forget after writing new files in earlier turns.
 7. **Chat auth is streaming, not `request()`** — JSON API calls use `withAuth` + one-shot 401 token replay. Keep `/chat` streaming on the same token-wait/retry behavior; grabbing `getToken()` once can race right after sign-in/sign-up and produce edge 401s.
+8. **Chat streams can outlive route state** — always pass an `AbortSignal` into `/chat` streaming and abort on unmount/session switch. A first-message stream that completes after the user leaves `/chat` can otherwise `router.replace` them back to `/chat/<id>`.
+9. **No `keepPreviousData` for per-session messages** — it can briefly render chat A's turns under chat B's URL during rapid session switching. Seed/cache only the exact `['messages', sessionId]` key.
 
 ## Backend gotchas
 
@@ -247,6 +249,7 @@ In chronological order, most recent last. Helps a fresh session understand the c
 - Bug fix: `import type { Plugin } from 'unified'` in rehype-citations.ts broke the CF Pages typecheck (transitive dep, not in package.json). Replaced with a plain transformer type.
 - Auth production fix: Clerk Frontend API is proxied through `https://ashgpt.xyz/__clerk`, sign-in/sign-up redirect to `/chat`, Worker JWKS discovery uses the proxy path, and chat streaming now waits for a Clerk token plus retries once after a 401.
 - Production auth verification: `https://ashgpt.xyz` now boots Clerk cleanly, sign-in modal opens on the production domain, and phone chat requests passed Worker auth; avoid testing Clerk on `*.ashgpt.pages.dev` previews unless that origin is explicitly added/configured in Clerk.
+- Performance/stability pass: chat streams now abort on unmount/session switch, first-session completion seeds exact message/session caches before URL promotion, per-session message queries no longer reuse previous-session data, cold history rehydrates when messages arrive, and the first-run tour lazy-loads after the app shell paints.
 
 ---
 

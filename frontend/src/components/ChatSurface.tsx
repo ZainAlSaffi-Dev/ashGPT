@@ -8,8 +8,11 @@ import { Send } from 'lucide-react';
 
 import { ChatMessage } from '@/components/ChatMessage';
 import { OnboardingChecklist } from '@/components/OnboardingChecklist';
+import { SkeletonList } from '@/components/ui/Skeleton';
+import { turnsToCachedMessages, upsertCachedSession } from '@/lib/chat-cache';
 import { useOnboarding } from '@/lib/queries';
 import { useChat, type ChatTurn } from '@/lib/useChat';
+import type { Message, SessionSummary } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 export interface ChatSurfaceProps {
@@ -17,6 +20,8 @@ export interface ChatSurfaceProps {
   initialSessionId?: string | null;
   /** Server-hydrated turns shown above the live in-progress assistant bubble. */
   initialTurns?: ChatTurn[];
+  /** True while a known session's history is loading for the first time. */
+  historyLoading?: boolean;
 }
 
 /**
@@ -25,22 +30,35 @@ export interface ChatSurfaceProps {
  * pass a session id; once the first ``done`` event lands we ``router.replace``
  * to the dynamic route so the URL is the source of truth.
  */
-export function ChatSurface({ initialSessionId, initialTurns }: ChatSurfaceProps) {
+export function ChatSurface({
+  initialSessionId,
+  initialTurns,
+  historyLoading = false,
+}: ChatSurfaceProps) {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const onboarding = useOnboarding();
 
   const { turns, send, busy, nodeTrace, sessionId } = useChat({
     initialSessionId,
     initialTurns,
+    onTurnCommitted: (id, committedTurns) => {
+      queryClient.setQueryData<Message[]>(
+        ['messages', id],
+        turnsToCachedMessages(committedTurns),
+      );
+      queryClient.setQueryData<SessionSummary[]>(['sessions'], (sessions) =>
+        upsertCachedSession(sessions, id, committedTurns),
+      );
+    },
     onSessionCreated: (id) => {
       // First reply on the landing route — promote to the dynamic URL so
       // reloads / sharing work. Replace (not push) so the back button still
       // lands the user on whatever they came from.
       router.replace(`/chat/${id}` as Route);
-      // Invalidate the sidebar's session list so the new chat appears.
-      queryClient.invalidateQueries({ queryKey: ['sessions'] });
     },
+  });
+  const onboarding = useOnboarding({
+    enabled: !historyLoading && turns.length === 0,
   });
 
   // Once a streamed turn lands, invalidate the cached message history for
@@ -50,8 +68,8 @@ export function ChatSurface({ initialSessionId, initialTurns }: ChatSurfaceProps
   const lastBusyRef = useRef(busy);
   useEffect(() => {
     if (lastBusyRef.current && !busy && sessionId) {
-      queryClient.invalidateQueries({ queryKey: ['messages', sessionId] });
-      queryClient.invalidateQueries({ queryKey: ['sessions'] });
+      void queryClient.invalidateQueries({ queryKey: ['messages', sessionId] });
+      void queryClient.invalidateQueries({ queryKey: ['sessions'] });
     }
     lastBusyRef.current = busy;
   }, [busy, sessionId, queryClient]);
@@ -87,7 +105,7 @@ export function ChatSurface({ initialSessionId, initialTurns }: ChatSurfaceProps
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!draft.trim()) return;
+    if (!draft.trim() || historyLoading) return;
     const q = draft;
     setDraft('');
     stickToBottomRef.current = true;
@@ -99,8 +117,14 @@ export function ChatSurface({ initialSessionId, initialTurns }: ChatSurfaceProps
       <div className="mb-4 flex items-center justify-between">
         <h1 className="font-serif text-2xl text-ink">Chat</h1>
         <button
-          onClick={() => router.push('/chat')}
-          className="text-sm text-ink-muted hover:text-accent"
+          onClick={() => {
+            if (!busy) router.push('/chat');
+          }}
+          disabled={busy}
+          className={cn(
+            'text-sm text-ink-muted hover:text-accent',
+            busy && 'cursor-not-allowed opacity-50',
+          )}
         >
           New chat
         </button>
@@ -111,19 +135,23 @@ export function ChatSurface({ initialSessionId, initialTurns }: ChatSurfaceProps
         onScroll={onScroll}
         className="flex-1 space-y-4 overflow-y-auto pr-1"
       >
-        {turns.length === 0 && (
+        {historyLoading ? (
+          <div className="rounded-lg border border-parchment-warm bg-parchment p-4">
+            <SkeletonList rows={5} />
+          </div>
+        ) : turns.length === 0 && (
           <>
-            {!onboarding.isComplete && (
+            {!onboarding.isLoading && !onboarding.isComplete && (
               <OnboardingChecklist variant="full" />
             )}
             <div className="rounded-lg border border-parchment-warm bg-parchment p-6 text-center text-ink-muted">
               <p className="font-serif text-lg text-ink">
-                {onboarding.readyFilesCount === 0
+                {!onboarding.isLoading && onboarding.readyFilesCount === 0
                   ? 'Add a file, then ask a question.'
                   : 'Start by asking a question.'}
               </p>
               <p className="mt-2 text-sm">
-                {onboarding.readyFilesCount === 0
+                {!onboarding.isLoading && onboarding.readyFilesCount === 0
                   ? 'Chat answers are grounded in the documents in your library.'
                   : 'Ask anything grounded in your uploaded notes, cases, or statutes.'}
               </p>
@@ -157,10 +185,12 @@ export function ChatSurface({ initialSessionId, initialTurns }: ChatSurfaceProps
         />
         <button
           type="submit"
-          disabled={busy || !draft.trim()}
+          disabled={busy || historyLoading || !draft.trim()}
           className={cn(
             'flex h-12 items-center justify-center rounded-lg bg-accent px-4 text-parchment shadow transition',
-            busy || !draft.trim() ? 'cursor-not-allowed opacity-50' : 'hover:bg-accent-hover',
+            busy || historyLoading || !draft.trim()
+              ? 'cursor-not-allowed opacity-50'
+              : 'hover:bg-accent-hover',
           )}
         >
           <Send className="h-4 w-4" />

@@ -1,6 +1,6 @@
 import { AppShell } from '@/components/AppShell';
 import { Providers } from '@/components/Providers';
-import { WelcomeTour } from '@/components/onboarding/WelcomeTour';
+import { WelcomeTourMount } from '@/components/onboarding/WelcomeTourMount';
 
 // Edge runtime so Clerk's middleware/cookies are available, but no
 // ``dynamic = 'force-dynamic'``: the layout itself never reads
@@ -17,7 +17,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <Providers>
       <AppShell>{children}</AppShell>
-      <WelcomeTour />
+      <WelcomeTourMount />
     </Providers>
   );
 }

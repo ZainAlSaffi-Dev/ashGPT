@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { SignInButton, SignUpButton, useAuth } from '@clerk/nextjs';
 import { motion } from 'framer-motion';
@@ -66,7 +67,7 @@ export default function LandingPage() {
           )}
           {isLoaded && isSignedIn && (
             <Button size="lg" asChild>
-              <a href="/chat">Open the app</a>
+              <Link href="/chat">Open the app</Link>
             </Button>
           )}
         </div>

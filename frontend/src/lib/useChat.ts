@@ -34,7 +34,9 @@ export interface UseChatOptions {
   /** Called the first time the backend returns a session_id — typically used
    *  by the ``/chat`` (no-id) landing route to ``router.replace`` to
    *  ``/chat/<id>`` so the URL becomes the source of truth.  */
-  onSessionCreated?: (sessionId: string) => void;
+  onSessionCreated?: (sessionId: string, turns: ChatTurn[]) => void;
+  /** Called whenever a streamed assistant turn commits server-side. */
+  onTurnCommitted?: (sessionId: string, turns: ChatTurn[]) => void;
 }
 
 export function useChat(opts: UseChatOptions = {}) {
@@ -46,80 +48,180 @@ export function useChat(opts: UseChatOptions = {}) {
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const turnsRef = useRef<ChatTurn[]>(opts.initialTurns ?? []);
+  const busyRef = useRef(false);
+  const sessionIdRef = useRef<string | null>(opts.initialSessionId ?? null);
+  const abortRef = useRef<AbortController | null>(null);
+  const sendSeqRef = useRef(0);
+  const mountedRef = useRef(false);
+  const callbacksRef = useRef({
+    onSessionCreated: opts.onSessionCreated,
+    onTurnCommitted: opts.onTurnCommitted,
+  });
+
+  useEffect(() => {
+    callbacksRef.current = {
+      onSessionCreated: opts.onSessionCreated,
+      onTurnCommitted: opts.onTurnCommitted,
+    };
+  }, [opts.onSessionCreated, opts.onTurnCommitted]);
+
+  const replaceTurns = useCallback(
+    (nextOrUpdater: ChatTurn[] | ((prev: ChatTurn[]) => ChatTurn[])) => {
+      const next =
+        typeof nextOrUpdater === 'function'
+          ? nextOrUpdater(turnsRef.current)
+          : nextOrUpdater;
+      turnsRef.current = next;
+      if (mountedRef.current) setTurns(next);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortRef.current?.abort();
+    };
+  }, []);
 
   // If the parent route switches sessionId (sidebar nav, browser back),
   // rebind. ``initialTurns`` is server-driven so we also reset turns when the
   // session reference changes to avoid leaking previous-session messages.
   const lastInitialSessionId = useRef<string | null | undefined>(opts.initialSessionId);
+  const lastInitialTurns = useRef<ChatTurn[] | undefined>(opts.initialTurns);
   useEffect(() => {
     if (opts.initialSessionId !== lastInitialSessionId.current) {
+      abortRef.current?.abort();
+      abortRef.current = null;
+      busyRef.current = false;
       lastInitialSessionId.current = opts.initialSessionId;
+      sessionIdRef.current = opts.initialSessionId ?? null;
       setSessionId(opts.initialSessionId ?? null);
-      setTurns(opts.initialTurns ?? []);
+      replaceTurns(opts.initialTurns ?? []);
       setNodeTrace([]);
       setError(null);
+      setBusy(false);
+      lastInitialTurns.current = opts.initialTurns;
+      return;
     }
-  }, [opts.initialSessionId, opts.initialTurns]);
+    if (
+      opts.initialTurns &&
+      opts.initialTurns !== lastInitialTurns.current &&
+      !busyRef.current
+    ) {
+      replaceTurns(opts.initialTurns);
+      setError(null);
+    }
+    lastInitialTurns.current = opts.initialTurns;
+  }, [opts.initialSessionId, opts.initialTurns, replaceTurns]);
 
   const send = useCallback(
     async (query: string, sendOpts?: { week_filter?: string | null }) => {
-      if (!query.trim() || busy) return;
+      if (!query.trim() || busyRef.current) return;
+      const seq = sendSeqRef.current + 1;
+      sendSeqRef.current = seq;
+      busyRef.current = true;
       setBusy(true);
       setError(null);
       setNodeTrace([]);
+      const controller = new AbortController();
+      abortRef.current = controller;
 
       const userId = crypto.randomUUID();
       const assistantId = crypto.randomUUID();
-      setTurns((t) => [
+      replaceTurns((t) => [
         ...t,
         { id: userId, role: 'user', content: query },
         { id: assistantId, role: 'assistant', content: '', streaming: true },
       ]);
 
       const updateAssistant = (patch: Partial<ChatTurn>) =>
-        setTurns((t) => t.map((x) => (x.id === assistantId ? { ...x, ...patch } : x)));
+        replaceTurns((t) =>
+          t.map((x) => (x.id === assistantId ? { ...x, ...patch } : x)),
+        );
+
+      const isCurrent = () =>
+        mountedRef.current &&
+        sendSeqRef.current === seq &&
+        !controller.signal.aborted;
 
       try {
         await withAuth(getToken, (token) =>
           streamChat(
-            { query, session_id: sessionId, week_filter: sendOpts?.week_filter ?? null },
             {
-              onNode: (n) => setNodeTrace((trace) => [...trace, n]),
-              onSources: (sources) => updateAssistant({ sources }),
-              onIRAC: (irac) => updateAssistant({ irac }),
-              onMermaid: (mermaid) => updateAssistant({ mermaid }),
-              onVerification: (verification) => updateAssistant({ verification }),
+              query,
+              session_id: sessionIdRef.current,
+              week_filter: sendOpts?.week_filter ?? null,
+            },
+            {
+              onNode: (n) => {
+                if (isCurrent()) setNodeTrace((trace) => [...trace, n]);
+              },
+              onSources: (sources) => {
+                if (isCurrent()) updateAssistant({ sources });
+              },
+              onIRAC: (irac) => {
+                if (isCurrent()) updateAssistant({ irac });
+              },
+              onMermaid: (mermaid) => {
+                if (isCurrent()) updateAssistant({ mermaid });
+              },
+              onVerification: (verification) => {
+                if (isCurrent()) updateAssistant({ verification });
+              },
               onHistoryOverflow: (overflow) =>
-                updateAssistant({ historyOverflow: overflow }),
+                isCurrent() && updateAssistant({ historyOverflow: overflow }),
               onAnswerChunk: (text) =>
-                setTurns((t) =>
+                isCurrent() &&
+                replaceTurns((t) =>
                   t.map((x) =>
                     x.id === assistantId ? { ...x, content: x.content + text } : x,
                   ),
                 ),
               onDone: ({ session_id, intent, latency_ms, final_answer }) => {
-                if (!sessionId && session_id) {
+                if (!isCurrent()) return;
+                const wasNewSession = !sessionIdRef.current && !!session_id;
+                const committedTurns = turnsRef.current.map((x) =>
+                  x.id === assistantId
+                    ? {
+                        ...x,
+                        intent,
+                        latency_ms,
+                        streaming: false,
+                        content: final_answer || '',
+                      }
+                    : x,
+                );
+                turnsRef.current = committedTurns;
+                replaceTurns(committedTurns);
+                sessionIdRef.current = session_id;
+                setSessionId(session_id);
+                callbacksRef.current.onTurnCommitted?.(session_id, committedTurns);
+                if (wasNewSession) {
                   // First reply on the landing route — let the caller move
                   // the URL bar before the next turn so refresh / share works.
-                  opts.onSessionCreated?.(session_id);
+                  callbacksRef.current.onSessionCreated?.(session_id, committedTurns);
                 }
-                setSessionId(session_id);
-                updateAssistant({
-                  intent,
-                  latency_ms,
-                  streaming: false,
-                  content: final_answer || '',
-                });
               },
               onError: (detail) => {
+                if (!isCurrent()) return;
                 setError(detail);
                 updateAssistant({ streaming: false, content: `_error: ${detail}_` });
               },
             },
-            { token, getFreshToken: () => getToken({ skipCache: true }) },
+            {
+              token,
+              signal: controller.signal,
+              getFreshToken: () => getToken({ skipCache: true }),
+            },
           ),
         );
       } catch (e) {
+        if (controller.signal.aborted || sendSeqRef.current !== seq || !mountedRef.current) {
+          return;
+        }
         const msg =
           e instanceof AuthNotReadyError
             ? 'Still signing you in. Please try again in a moment.'
@@ -129,10 +231,14 @@ export function useChat(opts: UseChatOptions = {}) {
         setError(msg);
         updateAssistant({ streaming: false, content: `_error: ${msg}_` });
       } finally {
-        setBusy(false);
+        if (sendSeqRef.current === seq) {
+          busyRef.current = false;
+          abortRef.current = null;
+          if (mountedRef.current) setBusy(false);
+        }
       }
     },
-    [busy, sessionId, getToken, opts],
+    [getToken, replaceTurns],
   );
 
   return { turns, send, busy, error, sessionId, nodeTrace };

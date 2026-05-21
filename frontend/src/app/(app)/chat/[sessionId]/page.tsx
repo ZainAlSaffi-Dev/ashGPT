@@ -21,6 +21,7 @@ export default function ChatSessionPage({ params }: PageProps) {
   // turns so the composer is interactive while the messages stream in.
   const messagesQuery = useMessages(sessionId);
   const messages = messagesQuery.data;
+  const historyLoading = !messages && messagesQuery.isLoading;
 
   if (messagesQuery.isError && !messages) {
     return (
@@ -42,5 +43,11 @@ export default function ChatSessionPage({ params }: PageProps) {
     latency_ms: m.latency_ms ?? undefined,
   }));
 
-  return <ChatSurface initialSessionId={sessionId} initialTurns={turns} />;
+  return (
+    <ChatSurface
+      initialSessionId={sessionId}
+      initialTurns={messages ? turns : undefined}
+      historyLoading={historyLoading}
+    />
+  );
 }
