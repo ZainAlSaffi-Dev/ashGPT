@@ -22,6 +22,7 @@ export interface Env {
   DB: D1Database;
   CLERK_ISSUER: string;
   CLERK_SECRET_KEY: string;
+  CLERK_ACCEPTED_ISSUERS?: string;
   CLERK_FAPI?: string;
   CLERK_JWKS_URL?: string;
   CLERK_PROXY_URL?: string;
@@ -77,6 +78,13 @@ function getJwks(env: Env) {
   return _jwks;
 }
 
+function getAcceptedIssuers(env: Env): string[] {
+  return (env.CLERK_ACCEPTED_ISSUERS ?? env.CLERK_ISSUER)
+    .split(',')
+    .map((issuer) => issuer.trim().replace(/\/$/, ''))
+    .filter(Boolean);
+}
+
 async function verifyClerk(req: Request, env: Env): Promise<JWTPayload | null> {
   const auth = req.headers.get('authorization') ?? '';
   const [scheme, token] = auth.split(/\s+/);
@@ -87,7 +95,7 @@ async function verifyClerk(req: Request, env: Env): Promise<JWTPayload | null> {
   }
   try {
     const { payload } = await jwtVerify(token, getJwks(env), {
-      issuer: env.CLERK_ISSUER,
+      issuer: getAcceptedIssuers(env),
     });
     return payload;
   } catch (e) {
@@ -101,7 +109,7 @@ async function verifyClerk(req: Request, env: Env): Promise<JWTPayload | null> {
         preview = `iss=${claims.iss} aud=${claims.aud} azp=${claims.azp} exp=${claims.exp}`;
       }
     } catch {}
-    console.error(`verifyClerk failed: ${msg} | ${preview} | CLERK_ISSUER=${env.CLERK_ISSUER}`);
+    console.error(`verifyClerk failed: ${msg} | ${preview} | accepted=${getAcceptedIssuers(env).join(',')}`);
     return null;
   }
 }
